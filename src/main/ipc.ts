@@ -3,6 +3,7 @@ import { appState } from './state';
 import { loadConnections, saveConnections } from './storage';
 import * as postgres from './postgres';
 import {
+  buildConnectionString,
   toSavedConnection,
   toSafe,
   toSummary,
@@ -37,14 +38,36 @@ export function registerIpcHandlers(): void {
     return snapshotWithTree();
   });
 
+  ipcMain.handle('host-stats', async () => {
+    if (!appState.activeConnection) throw new Error('No active database connection');
+    return postgres.getHostStats(appState.activeConnection);
+  });
+
+  ipcMain.handle('active-queries', async () => {
+    if (!appState.activeConnection) throw new Error('No active database connection');
+    return postgres.getActiveQueries(appState.activeConnection);
+  });
+
+  ipcMain.handle('test-connection', async (_event, connection: ConnectionInput) => {
+    console.log('[test-connection] received:', JSON.stringify(connection));
+    const saved = toSavedConnection(connection);
+    console.log('[test-connection] connectionString:', buildConnectionString(saved));
+    await postgres.testConnection(saved);
+    return { success: true };
+  });
+
   ipcMain.handle('connect', async (_event, connection: ConnectionInput, save: boolean) => {
     const saved = toSavedConnection(connection);
     await postgres.testConnection(saved);
 
     if (save) {
       const existing = loadConnections();
-      const idx = existing.findIndex((c) => c.id === saved.id);
+      const idx = existing.findIndex((c) =>
+        c.id === saved.id ||
+        (c.host === saved.host && c.port === saved.port && c.database === saved.database && c.user === saved.user)
+      );
       if (idx >= 0) {
+        saved.id = existing[idx].id;
         existing[idx] = saved;
       } else {
         existing.push(saved);

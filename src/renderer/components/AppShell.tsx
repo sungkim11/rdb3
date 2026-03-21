@@ -1,5 +1,5 @@
 import type { PropsWithChildren, ReactNode } from 'react';
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../lib/api';
 import { SqlEditor } from './SqlEditor';
 import type {
@@ -7,6 +7,9 @@ import type {
   AppSnapshot,
   ConnectionInput,
   DdlResult,
+  HostStats,
+  IndexNode,
+  KeyNode,
   QueryResult,
   SafeSavedConnection,
   SchemaNode,
@@ -97,6 +100,14 @@ function makeTabId(prefix: string) {
   return `${prefix}-${crypto.randomUUID()}`;
 }
 
+function formatDuration(ms: number): string {
+  if (ms < 1000) return `${ms} ms`;
+  const s = ms / 1000;
+  if (s < 60) return `${s.toFixed(1)} s`;
+  const m = Math.floor(s / 60);
+  return `${m}m ${Math.floor(s % 60)}s`;
+}
+
 function errorMessage(err: unknown): string {
   if (err instanceof Error) return err.message;
   if (typeof err === 'string') return err;
@@ -124,6 +135,15 @@ export function AppShell() {
   const [contextMenu, setContextMenu] = useState<ContextMenuState>(null);
   const [connectionContextMenu, setConnectionContextMenu] = useState<ConnectionContextMenuState>(null);
   const [confirmDialog, setConfirmDialog] = useState<ConfirmDialogState>(null);
+  const [testStatus, setTestStatus] = useState<'idle' | 'testing' | 'success' | 'fail'>('idle');
+  const [testError, setTestError] = useState('');
+  const [hostStats, setHostStats] = useState<HostStats | null>(null);
+  const MAX_HISTORY = 30;
+  const [cpuHistory, setCpuHistory] = useState<number[]>([]);
+  const [ramHistory, setRamHistory] = useState<number[]>([]);
+  const [tpsHistory, setTpsHistory] = useState<number[]>([]);
+  const [saturationHistory, setSaturationHistory] = useState<number[]>([]);
+  const [cacheHitHistory, setCacheHitHistory] = useState<number[]>([]);
 
   const activeEditorTab = useMemo(
     () => editorTabs.find((tab) => tab.id === activeEditorTabId) ?? editorTabs[0],
@@ -213,6 +233,46 @@ export function AppShell() {
   useEffect(() => {
     void refresh();
   }, []);
+
+  useEffect(() => {
+    if (!snapshot?.activeConnection) {
+      setHostStats(null);
+      setCpuHistory([]);
+      setRamHistory([]);
+      setTpsHistory([]);
+      setSaturationHistory([]);
+      setCacheHitHistory([]);
+      return;
+    }
+
+    let cancelled = false;
+    async function fetchStats() {
+      try {
+        const stats = await api.hostStats();
+        if (cancelled) return;
+        setHostStats(stats);
+        if (stats.cpuUsagePercent != null) {
+          setCpuHistory((h) => [...h, stats.cpuUsagePercent!].slice(-MAX_HISTORY));
+        }
+        if (stats.memUsagePercent != null) {
+          setRamHistory((h) => [...h, stats.memUsagePercent!].slice(-MAX_HISTORY));
+        }
+        if (stats.tps != null) {
+          setTpsHistory((h) => [...h, stats.tps!].slice(-MAX_HISTORY));
+        }
+        if (stats.connectionSaturationPercent != null) {
+          setSaturationHistory((h) => [...h, stats.connectionSaturationPercent!].slice(-MAX_HISTORY));
+        }
+        if (stats.cacheHitRatio != null) {
+          setCacheHitHistory((h) => [...h, stats.cacheHitRatio!].slice(-MAX_HISTORY));
+        }
+      } catch {}
+    }
+
+    void fetchStats();
+    const interval = setInterval(() => void fetchStats(), 10000);
+    return () => { cancelled = true; clearInterval(interval); };
+  }, [snapshot?.activeConnection?.id]);
 
   useEffect(() => {
     function onPointerMove(event: PointerEvent) {
@@ -368,6 +428,8 @@ export function AppShell() {
   function openNewConnectionModal() {
     setDraft(EMPTY_CONNECTION);
     setPersistConnection(true);
+    setTestStatus('idle');
+    setTestError('');
     setShowConnectionModal(true);
     setOpenMenu(null);
   }
@@ -383,7 +445,21 @@ export function AppShell() {
       database: connection.database,
     });
     setPersistConnection(true);
+    setTestStatus('idle');
+    setTestError('');
     setShowConnectionModal(true);
+  }
+
+  async function handleTestConnection() {
+    try {
+      setTestStatus('testing');
+      setTestError('');
+      await api.testConnection(draft);
+      setTestStatus('success');
+    } catch (err) {
+      setTestStatus('fail');
+      setTestError(errorMessage(err));
+    }
   }
 
   async function handleConnect() {
@@ -473,7 +549,7 @@ export function AppShell() {
           id: crypto.randomUUID(),
           title,
           sql,
-          resultMeta: `${nextResult.rowCount} rows in ${nextResult.executionTimeMs} ms`,
+          resultMeta: formatDuration(nextResult.executionTimeMs),
         },
         ...current,
       ].slice(0, 12));
@@ -513,7 +589,7 @@ export function AppShell() {
           id: crypto.randomUUID(),
           title: `${schema}.${table}`,
           sql,
-          resultMeta: `preview · ${nextResult.rowCount} rows`,
+          resultMeta: formatDuration(nextResult.executionTimeMs),
         },
         ...current,
       ].slice(0, 12));
@@ -607,12 +683,12 @@ export function AppShell() {
   }
 
   return (
-    <main className="h-screen bg-white text-[13px] text-black" onClick={() => { if (openMenu) setOpenMenu(null); setContextMenu(null); setConnectionContextMenu(null); }}>
+    <main className="h-screen bg-transparent text-[13px] text-black" onClick={() => { if (openMenu) setOpenMenu(null); setContextMenu(null); setConnectionContextMenu(null); }}>
       <div className="flex h-screen flex-col overflow-hidden">
-        <header className="relative shrink-0 border-b border-gray-300 bg-[#0f1a2e]">
-          <div className="flex h-9 items-center justify-between px-3">
+        <header className="relative m-1.5 mb-0 shrink-0 overflow-hidden rounded-lg border border-white/20 bg-[#0f1a2e]/90 backdrop-blur-md">
+          <div className="flex h-7 items-center justify-between px-3">
             <div className="flex min-w-0 items-center gap-4" onClick={(event) => event.stopPropagation()}>
-              <div className="bg-[var(--accent)] px-2 py-[3px] text-[10px] font-bold uppercase tracking-[0.14em] text-white">
+              <div className="rounded-md bg-[var(--accent)] px-2 py-[3px] text-[10px] font-bold uppercase tracking-[0.14em] text-white">
                 rdb3
               </div>
               <div className="flex items-center gap-1 text-[12px] text-[var(--muted)]">
@@ -627,7 +703,7 @@ export function AppShell() {
             </div>
           </div>
 
-          <div className="flex items-center gap-1 bg-[#1e3a5f] px-3 py-1 text-[var(--muted)]">
+          <div className="flex items-center gap-1 bg-[#1e3a5f]/80 px-3 py-0.5 text-[var(--muted)]">
             <ToolbarIconButton onClick={openNewConnectionModal} title="New connection"><PlusIcon /></ToolbarIconButton>
             <ToolbarIconButton onClick={() => openNewQueryTab()} title="New query"><QueryIcon /></ToolbarIconButton>
             <ToolbarIconButton onClick={() => openSqlEditor()} title="Open SQL editor"><PanelIcon /></ToolbarIconButton>
@@ -636,7 +712,7 @@ export function AppShell() {
           </div>
 
           {openMenu ? (
-            <div className="absolute left-16 top-9 z-10 min-w-[220px] border border-gray-300 bg-[#252526] shadow-[0_8px_24px_rgba(0,0,0,0.45)]" onClick={(event) => event.stopPropagation()}>
+            <div className="absolute left-16 top-7 z-10 min-w-[220px] rounded-xl border border-white/20 bg-[#252526]/90 shadow-[0_8px_24px_rgba(0,0,0,0.3)] backdrop-blur-xl" onClick={(event) => event.stopPropagation()}>
               {openMenu === 'file' ? (
                 <MenuPanel>
                   <MenuItem label="Exit" onClick={() => void handleExit()} />
@@ -652,14 +728,14 @@ export function AppShell() {
           ) : null}
         </header>
 
-        <div className="flex flex-1 gap-1 overflow-hidden p-1">
-          <aside className="flex min-h-0 shrink-0 flex-col gap-1 text-[12px]" style={{ width: sidebarWidth }}>
-            <div className="flex shrink-0 flex-col overflow-hidden rounded border border-gray-300 bg-white" style={{ height: connectionsHeight }}>
-              <div className="flex items-center justify-between rounded-t border-b border-gray-300 bg-white px-3 py-2">
+        <div className="flex flex-1 gap-1.5 overflow-hidden px-1.5 pb-0 pt-1.5">
+          <aside className="flex min-h-0 shrink-0 flex-col gap-1.5 text-[12px]" style={{ width: sidebarWidth }}>
+            <div className="glass-panel flex shrink-0 flex-col overflow-hidden rounded-xl" style={{ height: connectionsHeight }}>
+              <div className="flex h-7 items-center justify-between border-b border-black/5 px-3">
                 <div className="text-[13px] font-medium text-black">Connections</div>
                 <ToolbarIconButton onClick={openNewConnectionModal} title="New connection"><PlusIcon /></ToolbarIconButton>
               </div>
-              <div className="sidebar-scroll flex-1 overflow-y-scroll px-2 py-2">
+              <div className="sidebar-scroll flex-1 overflow-y-scroll rounded-b-xl bg-white px-2 py-2">
                 {snapshot?.savedConnections.length ? (
                   <div>
                     {snapshot.savedConnections.map((connection) => {
@@ -680,17 +756,17 @@ export function AppShell() {
               </div>
             </div>
 
-            <div className="h-px shrink-0 cursor-row-resize bg-gray-300 hover:bg-[var(--accent)]" onPointerDown={(event) => { event.stopPropagation(); setDragState('connections'); }} />
+            <div className="h-px shrink-0 cursor-row-resize bg-black/10 hover:bg-[var(--accent)]" onPointerDown={(event) => { event.stopPropagation(); setDragState('connections'); }} />
 
-            <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded border border-gray-300 bg-white">
-              <div className="flex items-center justify-between rounded-t border-b border-gray-300 bg-white px-3 py-2">
+            <div className="glass-panel flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl">
+              <div className="flex h-7 items-center justify-between border-b border-black/5 px-3">
                 <div className="text-[13px] font-medium text-black">Explorer</div>
                 <div className="flex items-center gap-1 text-gray-500">
                   <ToolbarIconButton onClick={() => void refresh()} title="Refresh"><RefreshIcon /></ToolbarIconButton>
                   <ToolbarIconButton onClick={() => openSqlEditor()} title="Open SQL editor"><PanelIcon /></ToolbarIconButton>
                 </div>
               </div>
-              <div className="sidebar-scroll min-h-0 flex-1 overflow-y-scroll px-2 py-2">
+              <div className="sidebar-scroll min-h-0 flex-1 overflow-y-scroll rounded-b-xl bg-white px-2 py-2">
                 {snapshot?.activeConnection ? (
                   <DatabaseTree
                     connection={snapshot.activeConnection}
@@ -708,22 +784,64 @@ export function AppShell() {
             </div>
           </aside>
 
-          <div className="w-px shrink-0 cursor-col-resize bg-gray-300 hover:bg-[var(--accent)]" onPointerDown={(event) => { event.stopPropagation(); setDragState('sidebar'); }} />
+          <div className="w-px shrink-0 cursor-col-resize bg-black/10 hover:bg-[var(--accent)]" onPointerDown={(event) => { event.stopPropagation(); setDragState('sidebar'); }} />
 
-          <div className="flex min-w-0 flex-1 flex-col gap-1">
+          <div className="flex min-w-0 flex-1 flex-col gap-1.5">
+            <div className="glass-panel flex shrink-0 flex-col overflow-hidden rounded-xl" style={{ height: connectionsHeight }}>
+              <div className="flex h-7 items-center justify-between border-b border-black/5 px-3">
+                <div className="text-[13px] font-medium text-black">Dashboard</div>
+              </div>
+              <div className="flex flex-1 gap-3 overflow-hidden rounded-b-xl bg-white px-3 py-3">
+                <div className="flex w-1/2 shrink-0 gap-2 overflow-hidden">
+                  <DashboardGraphCard label={"Server\nCPU"} value={hostStats?.cpuUsagePercent != null ? `${hostStats.cpuUsagePercent}%` : '—'} data={cpuHistory} max={100} color="#3b82f6" warnColor="#ef4444" warn={hostStats?.cpuUsagePercent != null && hostStats.cpuUsagePercent > 80} />
+                  <DashboardGraphCard label={"Server\nRAM"} value={hostStats?.memUsagePercent != null ? `${hostStats.memUsagePercent}%` : '—'} subtitle={hostStats?.memUsedMb != null ? `${hostStats.memUsedMb}/${hostStats.memTotalMb} MB` : undefined} data={ramHistory} max={100} color="#8b5cf6" warnColor="#ef4444" warn={hostStats?.memUsagePercent != null && hostStats.memUsagePercent > 80} />
+                  <DashboardGraphCard label={"Cache\nHit"} value={hostStats?.cacheHitRatio != null ? `${hostStats.cacheHitRatio}%` : '—'} data={cacheHitHistory} max={100} color="#06b6d4" />
+                  <DashboardGraphCard label="TXN Throughput" value={hostStats?.tps != null ? `${hostStats.tps} tps` : '—'} data={tpsHistory} color="#f59e0b" />
+                  <DashboardGraphCard label="Conn Saturation" value={hostStats?.connectionSaturationPercent != null ? `${hostStats.connectionSaturationPercent}%` : '—'} subtitle={hostStats?.activeConnections != null ? `${hostStats.activeConnections}/${hostStats.maxConnections}` : undefined} data={saturationHistory} max={100} color="#10b981" warnColor="#ef4444" warn={hostStats?.connectionSaturationPercent != null && hostStats.connectionSaturationPercent > 80} />
+                </div>
+                <div className="flex w-1/2 flex-col overflow-hidden rounded-lg border border-black/5">
+                  <div className="flex h-7 shrink-0 items-center border-b border-black/5 bg-gray-50 px-3">
+                    <span className="text-[12px] font-medium text-gray-600">Query History</span>
+                    <span className="ml-auto text-[11px] text-gray-400">{queryHistory.length} queries</span>
+                  </div>
+                  <div className="flex-1 overflow-y-auto">
+                    {queryHistory.length === 0 ? (
+                      <div className="flex h-full items-center justify-center text-[12px] text-gray-400">No queries yet</div>
+                    ) : (
+                      <table className="w-full text-[11px]">
+                        <tbody>
+                          {queryHistory.map((entry) => (
+                            <tr key={entry.id} className="group relative border-b border-black/5 hover:bg-gray-50">
+                              <td className="w-full px-2 py-1 font-mono text-gray-700">
+                                <div className="truncate">{entry.sql}</div>
+                                <div className="pointer-events-none absolute left-2 top-full z-50 hidden max-h-[200px] max-w-[500px] overflow-y-auto whitespace-pre-wrap break-all rounded-lg border border-black/10 bg-white px-3 py-2 font-mono text-[11px] text-gray-800 shadow-lg group-hover:block">{entry.sql}</div>
+                              </td>
+                              <td className="whitespace-nowrap px-2 py-1 text-right align-top tabular-nums text-gray-500">{entry.resultMeta}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div className="h-px shrink-0 cursor-row-resize bg-black/10 hover:bg-[var(--accent)]" />
+
             {showSqlEditor ? (
-              <div className="flex h-[38%] shrink-0 flex-col overflow-hidden rounded border border-gray-300 bg-white">
-                <div className="flex items-center justify-between rounded-t border-b border-gray-300 bg-white px-3 py-2">
+              <div className="glass-panel flex h-[38%] shrink-0 flex-col overflow-hidden rounded-xl">
+                <div className="flex h-7 items-center justify-between border-b border-black/5 px-3">
                   <div className="text-[13px] font-medium text-black">SQL Editor</div>
                   <button className="px-1 py-0.5 text-[12px] leading-tight text-gray-500 hover:text-black" onClick={() => { setShowSqlEditor(false); setSqlTabs([]); setActiveSqlTabId(null); setEditorTabs([]); setActiveEditorTabId(''); }} type="button">Close</button>
                 </div>
-                <div className="flex items-center border-b border-gray-300 bg-white px-1 pt-1">
+                <div className="flex items-center border-b border-black/5 bg-white px-1 pt-1">
                   <div className="flex min-w-0 flex-1 overflow-auto">
                     {sqlTabs.map((tab) => (
                       <button
                         className={classNames(
-                          'group flex min-w-[100px] max-w-[200px] items-center gap-2 border-r border-gray-300 px-3 py-1.5 text-left',
-                          tab.id === activeSqlTab?.id ? 'bg-[#f0f0f0] text-black' : 'bg-white text-gray-500',
+                          'group flex min-w-[100px] max-w-[200px] items-center gap-2 border-r border-black/5 px-3 py-1.5 text-left rounded-t-lg',
+                          tab.id === activeSqlTab?.id ? 'bg-white text-black' : 'bg-gray-50 text-gray-400',
                         )}
                         key={tab.id}
                         onClick={() => setActiveSqlTabId(tab.id)}
@@ -744,10 +862,10 @@ export function AppShell() {
                     <button className="px-2 py-1 text-[18px] font-bold text-gray-400 hover:text-black" onClick={addSqlTab} type="button" title="New tab">+</button>
                   </div>
                 </div>
-                <div className="flex min-h-0 flex-1">
+                <div className="flex min-h-0 flex-1 rounded-b-xl bg-white">
                   <div className="flex min-w-0 flex-1 flex-col">
-                    <div className="flex items-center gap-3 border-b border-gray-300 px-2 py-1">
-                      <button className="rounded bg-[var(--accent)] px-3 py-0.5 text-[12px] leading-tight text-white hover:opacity-90" onClick={() => void handleRunQuery(sqlEditorText)} type="button">Run</button>
+                    <div className="flex items-center gap-3 border-b border-black/5 px-2 py-1">
+                      <button className="rounded-lg bg-[var(--accent)] px-3 py-0.5 text-[12px] leading-tight text-white hover:opacity-90" onClick={() => void handleRunQuery(sqlEditorText)} type="button">Run</button>
                       <button className="px-1 py-0.5 text-[12px] leading-tight text-gray-500 hover:text-black" onClick={() => void handleSaveAs()} type="button">Save As</button>
                     </div>
                     <SqlEditor
@@ -756,12 +874,12 @@ export function AppShell() {
                       onRun={(text) => void handleRunQuery(text)}
                     />
                   </div>
-                  <div className="flex w-[270px] shrink-0 flex-col gap-1 overflow-y-auto border-l border-gray-300 px-2 py-1">
+                  <div className="flex w-[270px] shrink-0 flex-col gap-1 overflow-y-auto border-l border-black/5 px-2 py-1">
                     <span className="text-[12px] font-medium text-gray-500">History</span>
                     {queryHistory.map((entry) => (
                       <button
                         key={entry.id}
-                        className="rounded bg-gray-100 px-2 py-1 text-left text-[12px] text-gray-600 hover:bg-gray-200 hover:text-black"
+                        className="rounded-lg bg-white/40 px-2 py-1 text-left text-[12px] text-gray-600 hover:bg-white/60 hover:text-black"
                         onClick={() => setSqlEditorText(entry.sql)}
                         title={entry.sql}
                         type="button"
@@ -774,19 +892,19 @@ export function AppShell() {
               </div>
             ) : null}
 
-            <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded border border-gray-300 bg-white">
-              <div className="flex items-center justify-between rounded-t border-b border-gray-300 bg-white px-3 py-2">
+            <div className="glass-panel flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl">
+              <div className="flex h-7 items-center justify-between border-b border-black/5 px-3">
                 <div className="text-[13px] font-medium text-black">
                   {activeEditorTab?.kind === 'table' && activeEditorTab.source ? `Data - ${activeEditorTab.source.schema}.${activeEditorTab.source.table}` : 'Data'}
                 </div>
               </div>
-              <div className="flex items-center border-b border-gray-300 bg-white px-1 pt-1">
+              <div className="flex items-center border-b border-black/5 bg-white px-1 pt-1">
                 <div className="flex min-w-0 flex-1 overflow-auto">
                   {editorTabs.map((tab) => (
                     <button
                       className={classNames(
-                        'group flex min-w-[160px] max-w-[360px] items-center gap-2 border-r border-gray-300 px-3 py-1.5 text-left',
-                        tab.id === activeEditorTab?.id ? 'bg-[#f0f0f0] text-black' : 'bg-white text-gray-500',
+                        'group flex min-w-[160px] max-w-[360px] items-center gap-2 border-r border-black/5 px-3 py-1.5 text-left rounded-t-lg',
+                        tab.id === activeEditorTab?.id ? 'bg-white text-black' : 'bg-gray-50 text-gray-400',
                       )}
                       key={tab.id}
                       onClick={() => setActiveEditorTabId(tab.id)}
@@ -812,14 +930,14 @@ export function AppShell() {
                 </div>
               </div>
 
-              <div className="flex min-h-0 flex-1 flex-col">
+              <div className="flex min-h-0 flex-1 flex-col rounded-b-xl bg-white">
                 {activeEditorTab?.kind === 'ddl' && activeEditorTab.ddlText ? (
-                  <div className="min-h-0 flex-1 overflow-auto bg-white p-4">
+                  <div className="min-h-0 flex-1 overflow-auto p-4">
                     <pre className="font-mono text-[13px] leading-relaxed text-black whitespace-pre">{activeEditorTab.ddlText}</pre>
                   </div>
                 ) : processedResult ? (
                   <>
-                    <div className="min-h-0 flex-1 overflow-scroll bg-white">
+                    <div className="min-h-0 flex-1 overflow-scroll">
                       <ResultsTable
                         result={processedResult}
                         sortState={activeEditorTab?.sortState ?? null}
@@ -827,7 +945,7 @@ export function AppShell() {
                         rowOffset={processedResult.pageStart}
                       />
                     </div>
-                    <div className="flex shrink-0 items-center justify-center gap-2 border-t border-gray-300 bg-[#f0f0f0] px-3 py-1.5 text-[14px] text-gray-600">
+                    <div className="flex shrink-0 items-center justify-center gap-2 border-t border-black/5 bg-white/30 px-3 py-1.5 text-[14px] text-gray-600">
                       <button className="px-1 py-0.5 text-[16px] font-extrabold hover:text-black disabled:opacity-30" disabled={processedResult.currentPage === 0} onClick={() => updateActiveTab({ currentPage: 0 })} type="button">{'<<'}</button>
                       <button className="px-1 py-0.5 text-[16px] font-extrabold hover:text-black disabled:opacity-30" disabled={processedResult.currentPage === 0} onClick={() => updateActiveTab({ currentPage: processedResult.currentPage - 1 })} type="button">{'<'}</button>
                       <span>{processedResult.rowCount > 0 ? `${(processedResult.pageStart + 1).toLocaleString()}-${Math.min(processedResult.pageStart + PAGE_SIZE, processedResult.rowCount).toLocaleString()}` : '0'} of {processedResult.rowCount.toLocaleString()}</span>
@@ -836,7 +954,7 @@ export function AppShell() {
                     </div>
                   </>
                 ) : (
-                  <div className="min-h-0 flex-1 overflow-auto bg-white p-2">
+                  <div className="min-h-0 flex-1 overflow-auto p-2">
                     <WorkspaceEmpty title="No results" body="Run a query or click a table from the explorer." />
                   </div>
                 )}
@@ -845,7 +963,7 @@ export function AppShell() {
           </div>
         </div>
 
-        <footer className="flex h-6 items-center justify-between gap-3 border-t border-gray-300 bg-[var(--bg-elevated)] px-3 text-[11px] text-[var(--muted)]">
+        <footer className="flex h-6 items-center justify-between gap-3 border-t border-white/20 bg-white/40 px-3 text-[11px] text-gray-500 backdrop-blur-md">
           <div className="truncate">{loading || error || (snapshot?.activeConnection ? `Connected as ${snapshot.activeConnection.user}` : 'Waiting for a database connection.')}</div>
           <div>{error ? 'error' : snapshot?.activeConnection ? 'online' : 'offline'}</div>
         </footer>
@@ -858,12 +976,12 @@ export function AppShell() {
           onContextMenu={(event) => { event.preventDefault(); setContextMenu(null); }}
         >
           <div
-            className="absolute min-w-[180px] border border-gray-300 bg-white py-1 shadow-lg"
+            className="glass-panel-strong absolute min-w-[180px] rounded-xl py-1 shadow-lg"
             style={{ left: contextMenu.x, top: contextMenu.y }}
             onClick={(event) => event.stopPropagation()}
           >
             <button
-              className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] text-black hover:bg-blue-50"
+              className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] text-black hover:bg-white/40"
               onClick={() => {
                 const { schema, table } = contextMenu;
                 setContextMenu(null);
@@ -875,7 +993,7 @@ export function AppShell() {
               Show DDL
             </button>
             <button
-              className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] text-black hover:bg-blue-50"
+              className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] text-black hover:bg-white/40"
               onClick={() => {
                 const { schema, table } = contextMenu;
                 setContextMenu(null);
@@ -887,7 +1005,7 @@ export function AppShell() {
               Export CSV
             </button>
             <button
-              className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] text-black hover:bg-blue-50"
+              className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] text-black hover:bg-white/40"
               onClick={() => {
                 const { schema, table } = contextMenu;
                 setContextMenu(null);
@@ -909,12 +1027,12 @@ export function AppShell() {
           onContextMenu={(event) => { event.preventDefault(); setConnectionContextMenu(null); }}
         >
           <div
-            className="absolute min-w-[160px] border border-gray-300 bg-white py-1 shadow-lg"
+            className="glass-panel-strong absolute min-w-[160px] rounded-xl py-1 shadow-lg"
             style={{ left: connectionContextMenu.x, top: connectionContextMenu.y }}
             onClick={(event) => event.stopPropagation()}
           >
             <button
-              className="flex w-full items-center px-3 py-1.5 text-left text-[12px] text-black hover:bg-blue-50"
+              className="flex w-full items-center px-3 py-1.5 text-left text-[12px] text-black hover:bg-white/40"
               onClick={() => {
                 const conn = connectionContextMenu.connection;
                 setConnectionContextMenu(null);
@@ -925,7 +1043,7 @@ export function AppShell() {
               Edit
             </button>
             <button
-              className="flex w-full items-center px-3 py-1.5 text-left text-[12px] text-black hover:bg-blue-50"
+              className="flex w-full items-center px-3 py-1.5 text-left text-[12px] text-black hover:bg-white/40"
               onClick={() => {
                 const conn = connectionContextMenu.connection;
                 setConnectionContextMenu(null);
@@ -943,21 +1061,21 @@ export function AppShell() {
       ) : null}
 
       {confirmDialog ? (
-        <div className="fixed inset-0 z-40 grid place-items-center bg-[rgba(0,0,0,0.2)] p-4">
-          <div className="w-full max-w-xs rounded border border-gray-300 bg-white shadow-lg">
+        <div className="fixed inset-0 z-40 grid place-items-center bg-black/20 backdrop-blur-sm p-4">
+          <div className="glass-panel-strong w-full max-w-xs rounded-2xl shadow-xl">
             <div className="px-5 py-4 text-[13px] text-black">{confirmDialog.message}</div>
-            <div className="flex justify-end gap-2 border-t border-gray-300 px-5 py-3">
-              <button className="rounded px-3 py-1 text-[12px] text-gray-500 hover:text-black" onClick={confirmDialog.onConfirm} type="button">Yes</button>
-              <button autoFocus className="rounded bg-[var(--accent)] px-3 py-1 text-[12px] text-white hover:opacity-90 focus:outline-none focus:ring-1 focus:ring-[var(--accent)]" onClick={() => setConfirmDialog(null)} type="button">No</button>
+            <div className="flex justify-end gap-2 border-t border-black/5 px-5 py-3">
+              <button className="rounded-lg px-3 py-1 text-[12px] text-gray-500 hover:text-black" onClick={confirmDialog.onConfirm} type="button">Yes</button>
+              <button autoFocus className="rounded-lg bg-[var(--accent)] px-3 py-1 text-[12px] text-white hover:opacity-90 focus:outline-none focus:ring-2 focus:ring-[var(--accent)]/30" onClick={() => setConfirmDialog(null)} type="button">No</button>
             </div>
           </div>
         </div>
       ) : null}
 
       {showConnectionModal ? (
-        <div className="fixed inset-0 z-20 grid place-items-center bg-[rgba(0,0,0,0.2)] p-4">
-          <div className="w-full max-w-sm rounded border border-gray-300 bg-white shadow-lg">
-            <div className="border-b border-gray-300 px-5 py-3">
+        <div className="fixed inset-0 z-20 grid place-items-center bg-black/20 backdrop-blur-sm p-4">
+          <div className="glass-panel-strong w-full max-w-sm rounded-2xl shadow-xl">
+            <div className="border-b border-black/5 px-5 py-3">
               <div className="text-[13px] font-medium text-black">{draft.id ? 'Edit connection' : 'New connection'}</div>
             </div>
             <div className="flex flex-col gap-4 p-5">
@@ -984,9 +1102,17 @@ export function AppShell() {
                 <div className="input bg-gray-50 text-gray-400">{`postgresql://${draft.user}@${draft.host}:${draft.port}/${draft.database}`}</div>
               </Field>
             </div>
-            <div className="flex items-center justify-end gap-2 border-t border-gray-300 px-5 py-3">
-              <button className="rounded border border-gray-300 px-3 py-1.5 text-[12px] text-gray-500 hover:text-black" onClick={() => setShowConnectionModal(false)} type="button">Cancel</button>
-              <button className="rounded bg-[var(--accent)] px-3 py-1.5 text-[12px] text-white hover:opacity-90" onClick={() => void handleConnect()} type="button">{draft.id ? 'Save' : 'Connect'}</button>
+            {testStatus === 'success' ? (
+              <div className="mx-5 rounded-lg bg-emerald-50 px-3 py-2 text-[12px] text-emerald-700">Connection successful</div>
+            ) : testStatus === 'fail' ? (
+              <div className="mx-5 rounded-lg bg-red-50 px-3 py-2 text-[12px] text-red-600">{testError || 'Connection failed'}</div>
+            ) : null}
+            <div className="flex items-center justify-between border-t border-black/5 px-5 py-3">
+              <button className="rounded-lg border border-black/10 px-3 py-1.5 text-[12px] text-gray-500 hover:text-black" onClick={() => void handleTestConnection()} disabled={testStatus === 'testing'} type="button">{testStatus === 'testing' ? 'Testing...' : 'Test Connection'}</button>
+              <div className="flex items-center gap-2">
+                <button className="rounded-lg border border-black/10 px-3 py-1.5 text-[12px] text-gray-500 hover:text-black" onClick={() => setShowConnectionModal(false)} type="button">Cancel</button>
+                <button className="rounded-lg bg-[var(--accent)] px-3 py-1.5 text-[12px] text-white hover:opacity-90" onClick={() => void handleConnect()} type="button">{draft.id ? 'Save' : 'Connect'}</button>
+              </div>
             </div>
           </div>
         </div>
@@ -999,8 +1125,8 @@ function MenuButton({ active, label, onClick }: { active: boolean; label: string
   return (
     <button
       className={classNames(
-        'px-2 py-1 text-[12px] text-[var(--muted)] hover:bg-[var(--selection)] hover:text-[var(--text)]',
-        active && 'bg-[var(--selection)] text-[var(--text)]',
+        'rounded-md px-2 py-1 text-[12px] text-[var(--muted)] hover:bg-white/10 hover:text-[var(--text)]',
+        active && 'bg-white/10 text-[var(--text)]',
       )}
       onClick={onClick}
       type="button"
@@ -1029,7 +1155,7 @@ function MenuItem({ label, shortcut, onClick }: { label: string; shortcut?: stri
 
 function ToolbarIconButton({ children, onClick, title }: PropsWithChildren<{ onClick: () => void; title: string }>) {
   return (
-    <button className="grid h-6 w-6 place-items-center border border-transparent text-[12px] text-[var(--muted)] hover:border-gray-300 hover:bg-[var(--bg-input)]" onClick={onClick} title={title} type="button">
+    <button className="grid h-6 w-6 place-items-center rounded-md border border-transparent text-[12px] text-[var(--muted)] hover:border-white/20 hover:bg-white/10" onClick={onClick} title={title} type="button">
       {children}
     </button>
   );
@@ -1048,17 +1174,178 @@ function Field({ label, children }: PropsWithChildren<{ label: string }>) {
   );
 }
 
+function Sparkline({ data, max, color, warnColor, warn, width = 120, height = 32 }: { data: number[]; max?: number; color: string; warnColor?: string; warn?: boolean; width?: number; height?: number }) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [actualWidth, setActualWidth] = useState(width);
+
+  useEffect(() => {
+    if (!containerRef.current) return;
+    const observer = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        setActualWidth(entry.contentRect.width);
+      }
+    });
+    observer.observe(containerRef.current);
+    return () => observer.disconnect();
+  }, []);
+
+  const strokeColor = warn && warnColor ? warnColor : color;
+  const fillColor = warn && warnColor ? warnColor : color;
+  const gradId = `sg-${color.replace('#', '')}-${warn ? 'w' : 'n'}`;
+
+  return (
+    <div ref={containerRef} style={{ height }} className="w-full shrink-0">
+      <svg width={actualWidth} height={height}>
+        <defs>
+          <linearGradient id={gradId} x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor={fillColor} stopOpacity="0.25" />
+            <stop offset="100%" stopColor={fillColor} stopOpacity="0.02" />
+          </linearGradient>
+        </defs>
+        {data.length >= 2 ? (() => {
+          const ceiling = max ?? Math.max(...data, 1);
+          const step = actualWidth / (data.length - 1);
+          const points = data.map((v, i) => `${i * step},${height - (v / ceiling) * height}`).join(' ');
+          const fillPoints = `0,${height} ${points} ${(data.length - 1) * step},${height}`;
+          return (
+            <>
+              <polygon points={fillPoints} fill={`url(#${gradId})`} />
+              <polyline points={points} fill="none" stroke={strokeColor} strokeWidth="1.5" strokeLinejoin="round" strokeLinecap="round" />
+            </>
+          );
+        })() : (
+          <line x1="0" y1={height - 1} x2={actualWidth} y2={height - 1} stroke={color} strokeWidth="1" strokeOpacity="0.2" />
+        )}
+      </svg>
+    </div>
+  );
+}
+
+function DashboardGraphCard({ label, value, subtitle, data, max, color, warnColor, warn }: { label: string; value: string; subtitle?: string; data: number[]; max?: number; color: string; warnColor?: string; warn?: boolean }) {
+  return (
+    <div className="flex min-w-[140px] flex-1 flex-col gap-1 rounded-lg border border-gray-200 bg-white/40 px-3 py-2">
+      <div className="flex items-baseline justify-between">
+        <div className="whitespace-pre-line text-[10px] font-medium uppercase leading-tight tracking-[0.08em] text-gray-500">{label}</div>
+        <div className={classNames('text-[16px] font-bold tabular-nums', warn ? 'text-red-500' : 'text-black')}>{value}</div>
+      </div>
+      <Sparkline data={data} max={max} color={color} warnColor={warnColor} warn={warn} height={36} />
+      {subtitle ? <div className="text-[9px] text-gray-400">{subtitle}</div> : null}
+    </div>
+  );
+}
+
+function DashboardCard({ label, value, accent, warn }: { label: string; value: string; accent?: boolean; warn?: boolean }) {
+  return (
+    <div className="flex min-w-[90px] flex-1 flex-col justify-center rounded-lg border border-gray-200 bg-white/40 px-3 py-2">
+      <div className="text-[10px] font-medium uppercase tracking-[0.08em] text-gray-500">{label}</div>
+      <div className={classNames('mt-0.5 truncate text-[14px] font-semibold', warn ? 'text-red-500' : accent ? 'text-emerald-600' : 'text-black')}>{value}</div>
+    </div>
+  );
+}
+
 function EmptyInline({ message }: { message: string }) {
   return <div className="px-1 py-1 text-gray-500">{message}</div>;
 }
 
 function WorkspaceEmpty({ title, body }: { title: string; body: string }) {
   return (
-    <div className="grid min-h-[240px] place-items-center border border-dashed border-gray-300 bg-[rgba(255,255,255,0.02)] p-5 text-center">
+    <div className="grid min-h-[240px] place-items-center rounded-xl border border-dashed border-black/10 bg-white/20 p-5 text-center">
       <div>
         <div className="text-sm text-black">{title}</div>
         <div className="mt-1 text-sm text-gray-500">{body}</div>
       </div>
+    </div>
+  );
+}
+
+function TableTreeNode({ schema, table, onPreview, onContextMenu }: { schema: string; table: TableNode; onPreview: (schema: string, table: string) => Promise<void>; onContextMenu: (event: React.MouseEvent, schema: string, table: string) => void }) {
+  const [open, setOpen] = useState(false);
+  const [openSections, setOpenSections] = useState<Record<string, boolean>>({});
+
+  const toggleSection = (section: string) => {
+    setOpenSections((c) => ({ ...c, [section]: !c[section] }));
+  };
+
+  return (
+    <div>
+      <div
+        className="flex cursor-grab items-center gap-1 pl-14 pr-2"
+        draggable
+        onDragStart={(event) => { event.dataTransfer.setData('text/plain', `${schema}.${table.name}`); event.dataTransfer.effectAllowed = 'copy'; }}
+        onContextMenu={(event) => onContextMenu(event, schema, table.name)}
+      >
+        <button className="w-4 shrink-0 text-center text-[10px] text-gray-400" onClick={() => setOpen((c) => !c)} type="button">
+          {open ? '\u25BE' : '\u25B8'}
+        </button>
+        <ExplorerIcon><TableIcon /></ExplorerIcon>
+        <button className="flex-1 truncate py-0.5 text-left text-black hover:bg-white/40" onClick={() => void onPreview(schema, table.name)} type="button">
+          {table.name}
+        </button>
+      </div>
+      {open ? (
+        <div className="pl-[72px]">
+          {/* Columns */}
+          <button className="flex w-full items-center gap-1 py-0.5 text-left text-[11px] text-gray-500 hover:text-black" onClick={() => toggleSection('columns')} type="button">
+            <span className="w-3 text-center text-[9px] text-gray-400">{openSections.columns ? '\u25BE' : '\u25B8'}</span>
+            <span>Columns</span>
+            <span className="text-gray-400">({table.columns.length})</span>
+          </button>
+          {openSections.columns ? (
+            <div className="pl-4">
+              {table.columns.map((col) => (
+                <div key={col.name} className="flex items-center gap-2 py-[1px] text-[11px]">
+                  <span className="text-gray-400">&#9702;</span>
+                  <span className="text-black">{col.name}</span>
+                  <span className="text-gray-400">{col.dataType}</span>
+                  {!col.nullable && <span className="text-[9px] text-red-400">NN</span>}
+                </div>
+              ))}
+            </div>
+          ) : null}
+
+          {/* Keys */}
+          <button className="flex w-full items-center gap-1 py-0.5 text-left text-[11px] text-gray-500 hover:text-black" onClick={() => toggleSection('keys')} type="button">
+            <span className="w-3 text-center text-[9px] text-gray-400">{openSections.keys ? '\u25BE' : '\u25B8'}</span>
+            <span>Keys</span>
+            <span className="text-gray-400">({table.keys.length})</span>
+          </button>
+          {openSections.keys ? (
+            <div className="pl-4">
+              {table.keys.length > 0 ? table.keys.map((k) => (
+                <div key={k.name} className="flex items-center gap-2 py-[1px] text-[11px]">
+                  <span className={k.type === 'PRIMARY KEY' ? 'text-amber-500' : k.type === 'FOREIGN KEY' ? 'text-blue-500' : 'text-gray-400'}>&#9670;</span>
+                  <span className="text-black">{k.name}</span>
+                  <span className="text-gray-400">{k.columns.join(', ')}</span>
+                  {k.referencedTable && <span className="text-[9px] text-blue-400">&rarr; {k.referencedTable}</span>}
+                </div>
+              )) : (
+                <div className="py-[1px] text-[11px] text-gray-400">None</div>
+              )}
+            </div>
+          ) : null}
+
+          {/* Indexes */}
+          <button className="flex w-full items-center gap-1 py-0.5 text-left text-[11px] text-gray-500 hover:text-black" onClick={() => toggleSection('indexes')} type="button">
+            <span className="w-3 text-center text-[9px] text-gray-400">{openSections.indexes ? '\u25BE' : '\u25B8'}</span>
+            <span>Indexes</span>
+            <span className="text-gray-400">({table.indexes.length})</span>
+          </button>
+          {openSections.indexes ? (
+            <div className="pl-4">
+              {table.indexes.length > 0 ? table.indexes.map((idx) => (
+                <div key={idx.name} className="flex items-center gap-2 py-[1px] text-[11px]">
+                  <span className="text-gray-400">&#9656;</span>
+                  <span className="text-black">{idx.name}</span>
+                  <span className="text-gray-400">{idx.columns.join(', ')}</span>
+                  {idx.isUnique && <span className="text-[9px] text-amber-500">UQ</span>}
+                </div>
+              )) : (
+                <div className="py-[1px] text-[11px] text-gray-400">None</div>
+              )}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -1081,7 +1368,7 @@ function DatabaseTree({ connection, tree, onPreview, onTableContextMenu }: { con
 
   return (
     <div className="overflow-auto">
-      <button className="flex w-full items-center gap-2 px-2 py-1 text-left hover:bg-blue-50" onClick={() => setDbOpen((c) => !c)} type="button">
+      <button className="flex w-full items-center gap-2 px-2 py-1 text-left hover:bg-white/40" onClick={() => setDbOpen((c) => !c)} type="button">
         <span className="w-4 shrink-0 text-center text-gray-500">{dbOpen ? '\u25BE' : '\u25B8'}</span>
         <ExplorerIcon><DatabaseIcon /></ExplorerIcon>
         <span className="flex-1 truncate text-black">{connection.database}@{connection.host}</span>
@@ -1092,7 +1379,7 @@ function DatabaseTree({ connection, tree, onPreview, onTableContextMenu }: { con
             const schemaOpen = openSchemas[schema.name] ?? true;
             return (
               <div key={schema.name}>
-                <button className="flex w-full items-center gap-2 py-1 pl-8 pr-2 text-left hover:bg-blue-50" onClick={() => setOpenSchemas((current) => ({ ...current, [schema.name]: !schemaOpen }))} type="button">
+                <button className="flex w-full items-center gap-2 py-1 pl-8 pr-2 text-left hover:bg-white/40" onClick={() => setOpenSchemas((current) => ({ ...current, [schema.name]: !schemaOpen }))} type="button">
                   <span className="w-4 shrink-0 text-center text-gray-500">{schemaOpen ? '\u25BE' : '\u25B8'}</span>
                   <ExplorerIcon><FolderIcon /></ExplorerIcon>
                   <span className="flex-1 truncate text-black">{schema.name}</span>
@@ -1101,18 +1388,13 @@ function DatabaseTree({ connection, tree, onPreview, onTableContextMenu }: { con
                 {schemaOpen ? (
                   <div>
                     {schema.tables.map((table) => (
-                      <div
-                        className="flex cursor-grab items-center gap-2 pl-14 pr-2"
-                        draggable
+                      <TableTreeNode
                         key={`${schema.name}.${table.name}`}
-                        onDragStart={(event) => { event.dataTransfer.setData('text/plain', `${schema.name}.${table.name}`); event.dataTransfer.effectAllowed = 'copy'; }}
-                        onContextMenu={(event) => onTableContextMenu(event, schema.name, table.name)}
-                      >
-                        <ExplorerIcon><TableIcon /></ExplorerIcon>
-                        <button className="flex-1 truncate py-1 text-left text-black hover:bg-blue-50" onClick={() => void onPreview(schema.name, table.name)} type="button">
-                          {table.name}
-                        </button>
-                      </div>
+                        schema={schema.name}
+                        table={table}
+                        onPreview={onPreview}
+                        onContextMenu={onTableContextMenu}
+                      />
                     ))}
                   </div>
                 ) : null}
@@ -1137,23 +1419,23 @@ function ResultsTable({
   rowOffset?: number;
 }) {
   return (
-    <div className="bg-white">
-      {result.notice ? <div className="border-b border-gray-300 bg-blue-50 px-4 py-2 text-sm text-blue-700">{result.notice}</div> : null}
+    <div className="bg-transparent">
+      {result.notice ? <div className="border-b border-black/5 bg-blue-50/60 px-4 py-2 text-sm text-blue-700">{result.notice}</div> : null}
       <div>
         <table className="min-w-full border-collapse font-sans text-[12px]">
-          <thead className="sticky top-0 z-[1] bg-[#f0f0f0] text-left text-black">
+          <thead className="sticky top-0 z-[1] bg-white/60 backdrop-blur-sm text-left text-black">
             <tr>
-              <th className="w-12 border-b border-r border-gray-300 px-3 pt-4 pb-2 font-medium text-right">#</th>
+              <th className="w-12 border-b border-r border-black/8 px-2 py-1 font-medium text-right">#</th>
               {result.columns.map((column, index) => (
-                <th className="relative border-b border-r border-gray-300 px-3 pt-4 pb-2 font-medium" key={column}>
+                <th className="relative border-b border-r border-black/8 px-2 py-1 font-medium" key={column}>
                   <div className="flex items-center gap-1">
                     <button className="flex-1 text-left" onClick={() => onSort(index)} type="button">
                       {column}
                     </button>
                     <span className="shrink-0 text-gray-400"><FilterIcon /></span>
-                    <button className="inline-flex shrink-0 flex-col leading-none text-[8px] text-gray-400" onClick={() => onSort(index)} type="button">
-                      <span className={sortState?.columnIndex === index && sortState.direction === 'asc' ? 'text-black' : ''}>&#9650;</span>
-                      <span className={sortState?.columnIndex === index && sortState.direction === 'desc' ? 'text-black' : ''}>&#9660;</span>
+                    <button className="inline-flex shrink-0 flex-col items-center gap-0 leading-[1] text-[7px]" onClick={() => onSort(index)} type="button">
+                      <span className={classNames('-mb-[4px]', sortState?.columnIndex === index && sortState.direction === 'asc' ? 'text-black' : 'text-white')} style={{ WebkitTextStroke: '0.5px #888' }}>&#9650;</span>
+                      <span className={classNames('-mt-[4px]', sortState?.columnIndex === index && sortState.direction === 'desc' ? 'text-black' : 'text-white')} style={{ WebkitTextStroke: '0.5px #888' }}>&#9660;</span>
                     </button>
                   </div>
                 </th>
@@ -1163,9 +1445,9 @@ function ResultsTable({
           <tbody>
             {result.rows.map((row, rowIndex) => (
               <tr key={`${rowIndex}-${row.join('|')}`}>
-                <td className="border-b border-r border-gray-300 px-3 py-2 text-right text-gray-400">{rowOffset + rowIndex + 1}</td>
+                <td className="border-b border-r border-black/8 px-2 py-0.5 text-right text-gray-400">{rowOffset + rowIndex + 1}</td>
                 {row.map((cell, cellIndex) => (
-                  <td className="max-w-[400px] border-b border-r border-gray-300 px-3 py-2 text-black" key={`${rowIndex}-${cellIndex}`}>
+                  <td className="max-w-[400px] border-b border-r border-black/8 px-2 py-0.5 text-black" key={`${rowIndex}-${cellIndex}`}>
                     <div className="overflow-hidden text-ellipsis whitespace-nowrap">{cell}</div>
                   </td>
                 ))}

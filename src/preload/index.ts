@@ -2,6 +2,10 @@ import { contextBridge, ipcRenderer } from 'electron';
 
 contextBridge.exposeInMainWorld('electronAPI', {
   bootstrap: () => ipcRenderer.invoke('bootstrap'),
+  hostStats: () => ipcRenderer.invoke('host-stats'),
+  activeQueries: () => ipcRenderer.invoke('active-queries'),
+  testConnection: (connection: unknown) =>
+    ipcRenderer.invoke('test-connection', connection),
   connect: (connection: unknown, save: boolean) =>
     ipcRenderer.invoke('connect', connection, save),
   activateSavedConnection: (id: string) =>

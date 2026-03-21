@@ -45,10 +45,25 @@ export interface ColumnNode {
   defaultValue: string | null;
 }
 
+export interface KeyNode {
+  name: string;
+  type: string; // 'PRIMARY KEY' | 'UNIQUE' | 'FOREIGN KEY'
+  columns: string[];
+  referencedTable: string | null;
+}
+
+export interface IndexNode {
+  name: string;
+  isUnique: boolean;
+  columns: string[];
+}
+
 export interface TableNode {
   name: string;
   tableType: string;
   columns: ColumnNode[];
+  keys: KeyNode[];
+  indexes: IndexNode[];
 }
 
 export interface SchemaNode {

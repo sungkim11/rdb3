@@ -40,10 +40,25 @@ export interface ColumnNode {
   defaultValue: Nullable<string>;
 }
 
+export interface KeyNode {
+  name: string;
+  type: string;
+  columns: string[];
+  referencedTable: string | null;
+}
+
+export interface IndexNode {
+  name: string;
+  isUnique: boolean;
+  columns: string[];
+}
+
 export interface TableNode {
   name: string;
   tableType: string;
   columns: ColumnNode[];
+  keys: KeyNode[];
+  indexes: IndexNode[];
 }
 
 export interface SchemaNode {
@@ -55,6 +70,28 @@ export interface AppSnapshot {
   savedConnections: SafeSavedConnection[];
   activeConnection: Nullable<ActiveConnectionSummary>;
   databaseTree: SchemaNode[];
+}
+
+export interface HostStats {
+  cpuUsagePercent: number | null;
+  memTotalMb: number | null;
+  memUsedMb: number | null;
+  memUsagePercent: number | null;
+  dbSizeMb: number | null;
+  activeConnections: number | null;
+  maxConnections: number | null;
+  connectionSaturationPercent: number | null;
+  tps: number | null;
+  uptime: string | null;
+  cacheHitRatio: number | null;
+}
+
+export interface ActiveQuery {
+  pid: number;
+  usename: string;
+  state: string;
+  query: string;
+  durationMs: number;
 }
 
 export interface DdlResult {

@@ -1,7 +1,10 @@
-import type { AppSnapshot, ConnectionInput, DdlResult, QueryResult } from './types';
+import type { ActiveQuery, AppSnapshot, ConnectionInput, DdlResult, HostStats, QueryResult } from './types';
 
 interface ElectronAPI {
   bootstrap(): Promise<AppSnapshot>;
+  hostStats(): Promise<HostStats>;
+  activeQueries(): Promise<ActiveQuery[]>;
+  testConnection(connection: ConnectionInput): Promise<{ success: boolean }>;
   connect(connection: ConnectionInput, save: boolean): Promise<AppSnapshot>;
   activateSavedConnection(id: string): Promise<AppSnapshot>;
   deleteSavedConnection(id: string): Promise<AppSnapshot>;
