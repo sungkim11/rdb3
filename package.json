@@ -15,6 +15,9 @@
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
     "test:live": "vitest run --config vitest.live.config.ts",
+    "test:e2e": "bun run build && playwright test",
+    "test:e2e:headed": "bun run build && playwright test --headed",
+    "test:all": "vitest run && vitest run --config vitest.live.config.ts && bun run build && playwright test",
     "dist": "bun run build && electron-builder --publish never",
     "dist:mac": "bun run build && electron-builder --mac --publish never",
     "dist:win": "bun run build && electron-builder --win --publish never",
@@ -73,6 +76,7 @@
     }
   },
   "devDependencies": {
+    "@playwright/test": "^1.58.2",
     "@tailwindcss/vite": "4.2",
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.2",
@@ -83,6 +87,7 @@
     "dotenv": "^17.3.1",
     "electron": "41.0.3",
     "electron-builder": "^26.8.1",
+    "electron-playwright-helpers": "^2.1.0",
     "jsdom": "^29.0.1",
     "tailwindcss": "4.2",
     "typescript": "^5.8.3",

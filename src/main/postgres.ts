@@ -2,6 +2,7 @@ import pg from 'pg';
 import type { SavedConnection, QueryResult, SchemaNode, ColumnNode, TableNode, KeyNode, IndexNode } from './types';
 import { buildConnectionString } from './types';
 import { openTunnel } from './ssh-tunnel';
+import { lookupPgpass } from './pgpass';
 
 function quoteIdentifier(value: string): string {
   return `"${value.replace(/"/g, '""')}"`;
@@ -68,60 +69,6 @@ async function connect(conn: SavedConnection): Promise<pg.Client> {
   return client;
 }
 
-/**
- * Parse ~/.pgpass and look up a password.
- * Format: hostname:port:database:username:password
- * Wildcards (*) match any value. Lines starting with # are comments.
- * See: https://www.postgresql.org/docs/current/libpq-pgpass.html
- */
-function lookupPgpass(host: string, port: number, database: string, user: string): string | null {
-  const fs = require('node:fs') as typeof import('node:fs');
-  const path = require('node:path') as typeof import('node:path');
-  const os = require('node:os') as typeof import('node:os');
-
-  const pgpassPath = process.env.PGPASSFILE || path.join(os.homedir(), '.pgpass');
-  try {
-    const content = fs.readFileSync(pgpassPath, 'utf-8');
-    const portStr = String(port);
-
-    for (const rawLine of content.split('\n')) {
-      const line = rawLine.trim();
-      if (!line || line.startsWith('#')) continue;
-
-      // Handle escaped colons (\:) and backslashes (\\)
-      const parts: string[] = [];
-      let current = '';
-      let escaped = false;
-      for (const ch of line) {
-        if (escaped) {
-          current += ch;
-          escaped = false;
-        } else if (ch === '\\') {
-          escaped = true;
-        } else if (ch === ':') {
-          parts.push(current);
-          current = '';
-        } else {
-          current += ch;
-        }
-      }
-      parts.push(current);
-
-      if (parts.length < 5) continue;
-
-      const [pHost, pPort, pDb, pUser, ...pPassParts] = parts;
-      const pPass = pPassParts.join(':'); // password may contain colons
-
-      const matches = (pattern: string, value: string) => pattern === '*' || pattern === value;
-      if (matches(pHost, host) && matches(pPort, portStr) && matches(pDb, database) && matches(pUser, user)) {
-        return pPass;
-      }
-    }
-  } catch {
-    // File doesn't exist or isn't readable — that's fine
-  }
-  return null;
-}
 
 export interface HostStats {
   cpuUsagePercent: number | null;

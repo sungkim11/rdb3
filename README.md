@@ -118,9 +118,22 @@ bun run test:coverage
 
 # Live PostgreSQL tests
 bun run test:live
+
+# Electron E2E tests
+bun run test:e2e
+
+# Electron E2E tests with a visible browser window
+bun run test:e2e:headed
+
+# Full suite
+bun run test:all
 ```
 
 `test:live` expects `DB_HOST`, `DB_PORT`, `DB_NAME`, and `DB_USER`. Password can come from `DB_PASSWORD` or from a matching entry in `~/.pgpass`.
+
+`test:e2e` builds the app and runs Playwright against the packaged Electron entrypoint. The E2E helper uses an isolated temporary `userData` directory, so test runs do not read or overwrite your real saved connections.
+
+The connected E2E flow also requires `DB_HOST`, `DB_PORT`, `DB_NAME`, and `DB_USER`, plus a matching `~/.pgpass` or `PGPASSFILE` entry. If that entry is missing, the connected specs are skipped.
 
 ## Building Installers
 

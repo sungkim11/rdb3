@@ -2,6 +2,11 @@ import { app, BrowserWindow } from 'electron';
 import path from 'node:path';
 import { registerIpcHandlers } from './ipc';
 
+// Allow E2E tests to isolate userData to a temp directory
+if (process.env.ELECTRON_USER_DATA_DIR) {
+  app.setPath('userData', process.env.ELECTRON_USER_DATA_DIR);
+}
+
 registerIpcHandlers();
 
 const createWindow = () => {
