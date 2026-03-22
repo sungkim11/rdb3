@@ -2,6 +2,7 @@ import { ipcMain, dialog, BrowserWindow } from 'electron';
 import { appState } from './state';
 import { loadConnections, saveConnections } from './storage';
 import * as postgres from './postgres';
+import { closeAllTunnels } from './ssh-tunnel';
 import {
   buildConnectionString,
   toSavedConnection,
@@ -102,6 +103,7 @@ export function registerIpcHandlers(): void {
 
   ipcMain.handle('disconnect', async () => {
     appState.activeConnection = null;
+    closeAllTunnels();
     return snapshotWithTree();
   });
 

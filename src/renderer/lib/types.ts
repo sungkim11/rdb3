@@ -1,5 +1,16 @@
 export type Nullable<T> = T | null;
 
+export interface SshConfig {
+  enabled: boolean;
+  host: string;
+  port: number;
+  user: string;
+  authMethod: 'password' | 'privateKey';
+  password: string;
+  privateKey: string;
+  passphrase: string;
+}
+
 export interface ConnectionInput {
   id?: string;
   name: string;
@@ -8,6 +19,8 @@ export interface ConnectionInput {
   user: string;
   password: string;
   database: string;
+  authMethod?: 'password' | 'pgpass';
+  ssh?: SshConfig;
 }
 
 export interface SavedConnection extends ConnectionInput {
@@ -22,6 +35,8 @@ export interface SafeSavedConnection {
   port: number;
   user: string;
   database: string;
+  authMethod?: 'password' | 'pgpass';
+  ssh?: { enabled: boolean; host: string; port: number; user: string; authMethod: string };
 }
 
 export interface ActiveConnectionSummary {

@@ -18,8 +18,20 @@ import type {
   QueryResult,
   SafeSavedConnection,
   SchemaNode,
+  SshConfig,
   TableNode,
 } from '../lib/types';
+
+const EMPTY_SSH: SshConfig = {
+  enabled: false,
+  host: '',
+  port: 22,
+  user: '',
+  authMethod: 'password',
+  password: '',
+  privateKey: '',
+  passphrase: '',
+};
 
 const EMPTY_CONNECTION: ConnectionInput = {
   name: '',
@@ -28,6 +40,8 @@ const EMPTY_CONNECTION: ConnectionInput = {
   user: 'postgres',
   password: '',
   database: 'postgres',
+  authMethod: 'password',
+  ssh: { ...EMPTY_SSH },
 };
 
 const QUERY_PRESETS = [
@@ -163,6 +177,7 @@ export function AppShell() {
   const [modifyTableDraft, setModifyTableDraft] = useState<{ columns: ModifyTableColumn[]; newTableName: string; addColumns: Array<{ name: string; dataType: string; nullable: boolean; defaultValue: string }>; dropColumns: Set<string> }>({ columns: [], newTableName: '', addColumns: [], dropColumns: new Set() });
   const [modifyTableError, setModifyTableError] = useState('');
   const [testStatus, setTestStatus] = useState<'idle' | 'testing' | 'success' | 'fail'>('idle');
+  const [connectionTab, setConnectionTab] = useState<'general' | 'ssh'>('general');
   const [testError, setTestError] = useState('');
   const [hostStats, setHostStats] = useState<HostStats | null>(null);
   const MAX_HISTORY = 30;
@@ -504,6 +519,7 @@ export function AppShell() {
     setPersistConnection(true);
     setTestStatus('idle');
     setTestError('');
+    setConnectionTab('general');
     setShowConnectionModal(true);
     setOpenMenu(null);
   }
@@ -517,10 +533,13 @@ export function AppShell() {
       user: connection.user,
       password: '',
       database: connection.database,
+      authMethod: connection.authMethod ?? 'password',
+      ssh: connection.ssh ? { ...EMPTY_SSH, enabled: connection.ssh.enabled, host: connection.ssh.host, port: connection.ssh.port, user: connection.ssh.user, authMethod: connection.ssh.authMethod as 'password' | 'privateKey' } : { ...EMPTY_SSH },
     });
     setPersistConnection(true);
     setTestStatus('idle');
     setTestError('');
+    setConnectionTab('general');
     setShowConnectionModal(true);
   }
 
@@ -1964,34 +1983,104 @@ export function AppShell() {
 
       {showConnectionModal ? (
         <div className="fixed inset-0 z-20 grid place-items-center bg-black/20 backdrop-blur-sm p-4">
-          <div className="glass-panel-strong w-full max-w-sm rounded-2xl shadow-xl">
+          <div className="glass-panel-strong w-full max-w-sm rounded-2xl shadow-xl flex flex-col">
             <div className="border-b border-black/5 px-5 py-3">
               <div className="text-[13px] font-medium text-black">{draft.id ? 'Edit connection' : 'New connection'}</div>
             </div>
-            <div className="flex flex-col gap-4 p-5">
-              <div className="grid grid-cols-[1fr_120px] gap-4">
-                <Field label="Host"><input className="input" value={draft.host} onChange={(event) => setDraft((current) => ({ ...current, host: event.target.value }))} /></Field>
-                <Field label="Port"><input className="input" inputMode="numeric" value={String(draft.port)} onChange={(event) => setDraft((current) => ({ ...current, port: Number.parseInt(event.target.value || '5432', 10) }))} /></Field>
-              </div>
-              <Field label="Authentication">
-                <select className="input text-gray-400" disabled>
-                  <option>User &amp; Password</option>
-                </select>
-              </Field>
-              <Field label="User"><input className="input" value={draft.user} onChange={(event) => setDraft((current) => ({ ...current, user: event.target.value }))} /></Field>
-              <div className="grid grid-cols-[1fr_160px] gap-4">
-                <Field label="Password"><input className="input" type="password" value={draft.password} onChange={(event) => setDraft((current) => ({ ...current, password: event.target.value }))} /></Field>
-                <Field label="Save">
-                  <select className="input text-gray-400" disabled>
-                    <option>Forever</option>
+            <div className="flex border-b border-black/5 px-5">
+              <button
+                className={classNames('px-3 py-2 text-[12px] border-b-2 -mb-px', connectionTab === 'general' ? 'border-[var(--accent)] text-black font-medium' : 'border-transparent text-gray-400 hover:text-gray-600')}
+                onClick={() => setConnectionTab('general')}
+                type="button"
+              >
+                General
+              </button>
+              <button
+                className={classNames('px-3 py-2 text-[12px] border-b-2 -mb-px', connectionTab === 'ssh' ? 'border-[var(--accent)] text-black font-medium' : 'border-transparent text-gray-400 hover:text-gray-600')}
+                onClick={() => setConnectionTab('ssh')}
+                type="button"
+              >
+                SSH / SSL
+              </button>
+            </div>
+
+            {connectionTab === 'general' ? (
+              <div className="flex flex-col gap-4 p-5">
+                <div className="grid grid-cols-[1fr_120px] gap-4">
+                  <Field label="Host"><input className="input" value={draft.host} onChange={(event) => setDraft((current) => ({ ...current, host: event.target.value }))} /></Field>
+                  <Field label="Port"><input className="input" inputMode="numeric" value={String(draft.port)} onChange={(event) => setDraft((current) => ({ ...current, port: Number.parseInt(event.target.value || '5432', 10) }))} /></Field>
+                </div>
+                <Field label="Authentication">
+                  <select className="input" value={draft.authMethod ?? 'password'} onChange={(e) => setDraft((c) => ({ ...c, authMethod: e.target.value as 'password' | 'pgpass', password: e.target.value === 'pgpass' ? '' : c.password }))}>
+                    <option value="password">User &amp; Password</option>
+                    <option value="pgpass">pgpass (~/.pgpass)</option>
                   </select>
                 </Field>
+                <Field label="User"><input className="input" value={draft.user} onChange={(event) => setDraft((current) => ({ ...current, user: event.target.value }))} /></Field>
+                {draft.authMethod !== 'pgpass' ? (
+                  <div className="grid grid-cols-[1fr_160px] gap-4">
+                    <Field label="Password">
+                      <input className="input" type="password" value={draft.password} onChange={(event) => setDraft((current) => ({ ...current, password: event.target.value }))} />
+                    </Field>
+                    <Field label="Save">
+                      <select className="input text-gray-400" disabled>
+                        <option>Forever</option>
+                      </select>
+                    </Field>
+                  </div>
+                ) : (
+                  <div className="rounded-lg bg-blue-50 px-3 py-2 text-[11px] text-blue-700">
+                    Password will be looked up from <span className="font-mono">~/.pgpass</span> matching {draft.host}:{draft.port}:{draft.database}:{draft.user}
+                  </div>
+                )}
+                <Field label="Database"><input className="input" value={draft.database} onChange={(event) => setDraft((current) => ({ ...current, database: event.target.value }))} /></Field>
+                <Field label="URL">
+                  <div className="input bg-gray-50 text-gray-400">{`postgresql://${draft.user}@${draft.host}:${draft.port}/${draft.database}`}</div>
+                </Field>
               </div>
-              <Field label="Database"><input className="input" value={draft.database} onChange={(event) => setDraft((current) => ({ ...current, database: event.target.value }))} /></Field>
-              <Field label="URL">
-                <div className="input bg-gray-50 text-gray-400">{`postgresql://${draft.user}@${draft.host}:${draft.port}/${draft.database}`}</div>
-              </Field>
-            </div>
+            ) : (
+              <div className="flex flex-col gap-4 p-5">
+                <div>
+                  <label className="flex items-center gap-2 text-[12px]">
+                    <input
+                      type="checkbox"
+                      checked={draft.ssh?.enabled ?? false}
+                      onChange={(e) => setDraft((c) => ({ ...c, ssh: { ...(c.ssh ?? EMPTY_SSH), enabled: e.target.checked } }))}
+                    />
+                    <span className="text-[11px] font-medium uppercase tracking-[0.08em] text-black">Enable SSH Tunnel</span>
+                  </label>
+                </div>
+
+                {draft.ssh?.enabled ? (
+                  <>
+                    <div className="grid grid-cols-[1fr_100px] gap-4">
+                      <Field label="SSH Host"><input className="input" value={draft.ssh.host} onChange={(e) => setDraft((c) => ({ ...c, ssh: { ...c.ssh!, host: e.target.value } }))} placeholder="bastion.example.com" /></Field>
+                      <Field label="SSH Port"><input className="input" inputMode="numeric" value={String(draft.ssh.port)} onChange={(e) => setDraft((c) => ({ ...c, ssh: { ...c.ssh!, port: Number.parseInt(e.target.value || '22', 10) } }))} /></Field>
+                    </div>
+                    <Field label="SSH User"><input className="input" value={draft.ssh.user} onChange={(e) => setDraft((c) => ({ ...c, ssh: { ...c.ssh!, user: e.target.value } }))} /></Field>
+                    <Field label="Auth Method">
+                      <select className="input" value={draft.ssh.authMethod} onChange={(e) => setDraft((c) => ({ ...c, ssh: { ...c.ssh!, authMethod: e.target.value as 'password' | 'privateKey' } }))}>
+                        <option value="password">Password</option>
+                        <option value="privateKey">Private Key</option>
+                      </select>
+                    </Field>
+                    {draft.ssh.authMethod === 'password' ? (
+                      <Field label="SSH Password"><input className="input" type="password" value={draft.ssh.password} onChange={(e) => setDraft((c) => ({ ...c, ssh: { ...c.ssh!, password: e.target.value } }))} /></Field>
+                    ) : (
+                      <>
+                        <Field label="Private Key Path"><input className="input" value={draft.ssh.privateKey} onChange={(e) => setDraft((c) => ({ ...c, ssh: { ...c.ssh!, privateKey: e.target.value } }))} placeholder="~/.ssh/id_rsa" /></Field>
+                        <Field label="Passphrase"><input className="input" type="password" value={draft.ssh.passphrase} onChange={(e) => setDraft((c) => ({ ...c, ssh: { ...c.ssh!, passphrase: e.target.value } }))} placeholder="optional" /></Field>
+                      </>
+                    )}
+                  </>
+                ) : (
+                  <div className="rounded-lg bg-gray-50 px-3 py-2 text-[11px] text-gray-500">
+                    SSH tunnel is disabled. Enable it to connect through a bastion/jump host.
+                  </div>
+                )}
+              </div>
+            )}
+
             {testStatus === 'success' ? (
               <div className="mx-5 rounded-lg bg-emerald-50 px-3 py-2 text-[12px] text-emerald-700">Connection successful</div>
             ) : testStatus === 'fail' ? (

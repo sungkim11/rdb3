@@ -1,6 +1,7 @@
 import pg from 'pg';
 import type { SavedConnection, QueryResult, SchemaNode, ColumnNode, TableNode, KeyNode, IndexNode } from './types';
 import { buildConnectionString } from './types';
+import { openTunnel } from './ssh-tunnel';
 
 function quoteIdentifier(value: string): string {
   return `"${value.replace(/"/g, '""')}"`;
@@ -35,16 +36,91 @@ function serializeValue(val: unknown): string {
 }
 
 async function connect(conn: SavedConnection): Promise<pg.Client> {
-  const client = new pg.Client({
-    host: conn.host,
-    port: conn.port,
+  let host = conn.host;
+  let port = conn.port;
+
+  // If SSH tunnel is enabled, route through it
+  if (conn.ssh?.enabled) {
+    port = await openTunnel(conn.ssh, conn.host, conn.port);
+    host = '127.0.0.1';
+  }
+
+  // Resolve password: use pgpass if authMethod is 'pgpass' or if password is empty
+  let password = conn.password;
+  if (conn.authMethod === 'pgpass' || !password) {
+    password = lookupPgpass(conn.host, conn.port, conn.database, conn.user) ?? '';
+  }
+
+  const config: pg.ClientConfig = {
+    host,
+    port,
     user: conn.user,
-    password: conn.password,
     database: conn.database,
-    connectionTimeoutMillis: 5000,
-  });
+    connectionTimeoutMillis: 10000,
+  };
+  // Only set password if we have one — omitting lets libpq/pg try env vars and pgpass
+  if (password) {
+    config.password = password;
+  }
+
+  const client = new pg.Client(config);
   await client.connect();
   return client;
+}
+
+/**
+ * Parse ~/.pgpass and look up a password.
+ * Format: hostname:port:database:username:password
+ * Wildcards (*) match any value. Lines starting with # are comments.
+ * See: https://www.postgresql.org/docs/current/libpq-pgpass.html
+ */
+function lookupPgpass(host: string, port: number, database: string, user: string): string | null {
+  const fs = require('node:fs') as typeof import('node:fs');
+  const path = require('node:path') as typeof import('node:path');
+  const os = require('node:os') as typeof import('node:os');
+
+  const pgpassPath = process.env.PGPASSFILE || path.join(os.homedir(), '.pgpass');
+  try {
+    const content = fs.readFileSync(pgpassPath, 'utf-8');
+    const portStr = String(port);
+
+    for (const rawLine of content.split('\n')) {
+      const line = rawLine.trim();
+      if (!line || line.startsWith('#')) continue;
+
+      // Handle escaped colons (\:) and backslashes (\\)
+      const parts: string[] = [];
+      let current = '';
+      let escaped = false;
+      for (const ch of line) {
+        if (escaped) {
+          current += ch;
+          escaped = false;
+        } else if (ch === '\\') {
+          escaped = true;
+        } else if (ch === ':') {
+          parts.push(current);
+          current = '';
+        } else {
+          current += ch;
+        }
+      }
+      parts.push(current);
+
+      if (parts.length < 5) continue;
+
+      const [pHost, pPort, pDb, pUser, ...pPassParts] = parts;
+      const pPass = pPassParts.join(':'); // password may contain colons
+
+      const matches = (pattern: string, value: string) => pattern === '*' || pattern === value;
+      if (matches(pHost, host) && matches(pPort, portStr) && matches(pDb, database) && matches(pUser, user)) {
+        return pPass;
+      }
+    }
+  } catch {
+    // File doesn't exist or isn't readable — that's fine
+  }
+  return null;
 }
 
 export interface HostStats {

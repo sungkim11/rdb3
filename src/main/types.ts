@@ -1,5 +1,27 @@
 import { randomUUID } from 'node:crypto';
 
+export interface SshConfig {
+  enabled: boolean;
+  host: string;
+  port: number;
+  user: string;
+  authMethod: 'password' | 'privateKey';
+  password: string;
+  privateKey: string;
+  passphrase: string;
+}
+
+export const EMPTY_SSH_CONFIG: SshConfig = {
+  enabled: false,
+  host: '',
+  port: 22,
+  user: '',
+  authMethod: 'password',
+  password: '',
+  privateKey: '',
+  passphrase: '',
+};
+
 export interface ConnectionInput {
   id?: string;
   name: string;
@@ -8,6 +30,8 @@ export interface ConnectionInput {
   user: string;
   password: string;
   database: string;
+  authMethod?: 'password' | 'pgpass';
+  ssh?: SshConfig;
 }
 
 export interface SavedConnection {
@@ -18,6 +42,8 @@ export interface SavedConnection {
   user: string;
   password: string;
   database: string;
+  authMethod?: 'password' | 'pgpass';
+  ssh?: SshConfig;
 }
 
 export interface SafeSavedConnection {
@@ -27,6 +53,8 @@ export interface SafeSavedConnection {
   port: number;
   user: string;
   database: string;
+  authMethod?: 'password' | 'pgpass';
+  ssh?: { enabled: boolean; host: string; port: number; user: string; authMethod: string };
 }
 
 export interface ActiveConnectionSummary {
@@ -99,6 +127,8 @@ export function toSavedConnection(input: ConnectionInput): SavedConnection {
     user: input.user,
     password: input.password,
     database: input.database,
+    authMethod: input.authMethod,
+    ssh: input.ssh,
   };
 }
 
@@ -110,6 +140,8 @@ export function toSafe(conn: SavedConnection): SafeSavedConnection {
     port: conn.port,
     user: conn.user,
     database: conn.database,
+    authMethod: conn.authMethod,
+    ssh: conn.ssh ? { enabled: conn.ssh.enabled, host: conn.ssh.host, port: conn.ssh.port, user: conn.ssh.user, authMethod: conn.ssh.authMethod } : undefined,
   };
 }
 
