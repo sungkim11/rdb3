@@ -1,24 +1,40 @@
 # PostGrip
 
-A lightweight, fast desktop PostgreSQL client built with Electron, React, and TypeScript.
+**The PostgreSQL client that gets out of your way.**
+
+PostGrip is a fast, lightweight desktop client for PostgreSQL. Browse schemas, write queries, edit data, and monitor your server — all from a clean, modern interface that feels native on macOS, Windows, and Linux.
+
+![PostGrip Screenshot](img/screenshot.png)
+
+## Why PostGrip?
+
+- **Zero config** — Reads your `~/.pgpass` automatically and offers one-click connections
+- **Fast startup** — Opens in under a second, no splash screens or loading spinners
+- **Built for daily use** — Schema explorer, SQL editor with autocomplete, inline data editing, and real-time server metrics in one window
+- **SSH tunnel support** — Connect through bastion hosts with password or private key auth
+- **Cross-platform** — Ships as a universal macOS DMG, Windows installer, and Linux AppImage/deb
 
 ## Features
 
 ### Connection Management
 - Save, edit, and manage multiple PostgreSQL connections
+- Auto-import connections from `~/.pgpass`
 - Test connections before saving
 - Quick-switch between saved connections
 - Password auth or `~/.pgpass`-based auth
-- Optional SSH tunneling for PostgreSQL connections
-- SSH password and private-key authentication support
+- SSH tunneling with password or private key authentication
 
 ### Schema Explorer
 - Hierarchical database tree: Schema > Tables > Columns / Keys / Indexes
 - Column details with data types, nullability, and defaults
 - Primary key, unique, and foreign key display with referenced tables
 - Index listing with uniqueness indicators
-- Drag-and-drop table names into the SQL editor
 - Right-click context menu with full table operations
+
+### File Explorer & Git Integration
+- Browse the local filesystem directly from the sidebar
+- View git status, changed files, and recent commits
+- Click changed files to view diffs
 
 ### SQL Editor
 - CodeMirror-based editor with SQL syntax highlighting
@@ -26,7 +42,7 @@ A lightweight, fast desktop PostgreSQL client built with Electron, React, and Ty
 - Multiple query tabs
 - Query presets (Session, Tables, Activity)
 - Save queries to `.sql` files
-- Sortable, paginated result grid
+- Sortable, paginated result grid with resizable columns
 - Query history with execution timing
 - Result export to CSV and Excel
 
@@ -38,34 +54,12 @@ A lightweight, fast desktop PostgreSQL client built with Electron, React, and Ty
 - Active query list from PostgreSQL activity views
 
 ### Table Operations (right-click context menu)
-- **Refresh** -- reload the database tree
-- **Show DDL** -- view the `CREATE TABLE` statement
-- **Edit Data** -- inline-editable data grid with:
-  - Double-click cells to edit (Tab/Shift+Tab navigation)
-  - Add and delete rows
-  - NULL value handling
-  - Pending changes tracker with Apply/Discard
-  - Requires a primary key for safe `UPDATE`/`DELETE`
-- **Export CSV** -- export table preview to CSV
-- **Export CSV (full table)** -- server-side export of all rows to CSV
-- **Export with pg_dump** -- export via `pg_dump` (SQL, custom, or tar format)
-- **Modify Table** -- GUI for altering table structure:
-  - Rename table
-  - Add, drop, rename columns
-  - Change column types, nullability, defaults
-  - Live DDL preview of pending `ALTER TABLE` statements
-  - All changes applied in a single transaction
-- **Truncate Table** -- delete all rows with confirmation dialog and optional CASCADE
-- **Drop Table** -- permanently delete table with confirmation dialog and optional CASCADE
-
-CASCADE options are automatically enabled only when other tables reference the target via foreign keys.
-
-## Authentication
-
-- Standard PostgreSQL username/password connections
-- `pgpass` support via `~/.pgpass` or `PGPASSFILE`
-- Optional SSH tunnel layer before connecting to PostgreSQL
-- SSH auth supports password or private key + passphrase
+- **Show DDL** — view the `CREATE TABLE` statement
+- **Edit Data** — inline-editable data grid with cell editing, row add/delete, NULL handling, and pending change tracking
+- **Export CSV** — export table data to CSV
+- **Export with pg_dump** — export via `pg_dump` (SQL, custom, or tar format)
+- **Modify Table** — rename table, add/drop/rename columns, change types and defaults with live DDL preview
+- **Truncate / Drop Table** — with confirmation dialog and optional CASCADE
 
 ## Tech Stack
 
@@ -171,6 +165,7 @@ src/
     index.ts        Window creation, app lifecycle
     ipc.ts          IPC handlers
     postgres.ts     PostgreSQL operations
+    pgpass.ts       ~/.pgpass parsing and lookup
     ssh-tunnel.ts   SSH tunnel lifecycle and forwarding
     types.ts        Shared type definitions
     state.ts        App state
