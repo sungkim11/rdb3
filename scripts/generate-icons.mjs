@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 /**
- * Generate app icons for rdb3.
+ * Generate app icons for PostGrip.
  * Creates a 1024x1024 PNG, then uses macOS `sips` + `iconutil` to produce .icns.
  * Also produces a 256x256 PNG for electron-builder to convert to .ico on Windows/Linux.
  *
- * Design: A rounded-rectangle database icon with "rdb3" branding.
+ * Design: A rounded-rectangle database icon with "PostGrip" branding.
  */
 
 import { execSync } from 'node:child_process';
@@ -35,7 +35,7 @@ const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${s
   <ellipse cx="512" cy="430" rx="240" ry="90" fill="none" stroke="url(#db)" stroke-width="20" opacity="0.35"/>
   <ellipse cx="512" cy="550" rx="240" ry="90" fill="none" stroke="url(#db)" stroke-width="20" opacity="0.35"/>
   <!-- Label -->
-  <text x="512" y="860" text-anchor="middle" font-family="system-ui, -apple-system, Helvetica, Arial, sans-serif" font-weight="800" font-size="130" letter-spacing="8" fill="white" opacity="0.95">rdb3</text>
+  <text x="512" y="860" text-anchor="middle" font-family="system-ui, -apple-system, Helvetica, Arial, sans-serif" font-weight="800" font-size="95" letter-spacing="6" fill="white" opacity="0.95">PostGrip</text>
 </svg>`;
 
 const svgPath = path.join(buildDir, 'icon.svg');

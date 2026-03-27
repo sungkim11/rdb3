@@ -1,4 +1,4 @@
-# rdb3
+# PostGrip
 
 A lightweight, fast desktop PostgreSQL client built with Electron, React, and TypeScript.
 

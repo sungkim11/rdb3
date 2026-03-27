@@ -39,5 +39,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.invoke('show-save-dialog', options),
   writeFile: (filePath: string, content: string) =>
     ipcRenderer.invoke('write-file', filePath, content),
+  getPgpassEntries: () => ipcRenderer.invoke('get-pgpass-entries'),
+  listDirectory: (dirPath: string) => ipcRenderer.invoke('list-directory', dirPath),
+  readTextFile: (filePath: string) => ipcRenderer.invoke('read-text-file', filePath),
+  getHomeDir: () => ipcRenderer.invoke('get-home-dir'),
+  gitStatus: (repoPath: string) => ipcRenderer.invoke('git-status', repoPath),
+  gitDiff: (repoPath: string, filePath: string) => ipcRenderer.invoke('git-diff', repoPath, filePath),
   closeWindow: () => ipcRenderer.invoke('close-window'),
 });

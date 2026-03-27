@@ -11,7 +11,9 @@ import {
   type AppSnapshot,
   type ConnectionInput,
 } from './types';
+import { parsePgpassEntries } from './pgpass';
 import fs from 'node:fs';
+import path from 'node:path';
 
 function snapshot(): AppSnapshot {
   const savedConnections = loadConnections().map(toSafe);
@@ -37,6 +39,10 @@ async function snapshotWithTree(): Promise<AppSnapshot> {
 export function registerIpcHandlers(): void {
   ipcMain.handle('bootstrap', async () => {
     return snapshotWithTree();
+  });
+
+  ipcMain.handle('get-pgpass-entries', () => {
+    return parsePgpassEntries();
   });
 
   ipcMain.handle('host-stats', async () => {
@@ -197,6 +203,66 @@ export function registerIpcHandlers(): void {
 
   ipcMain.handle('write-file', async (_event, filePath: string, content: string) => {
     fs.writeFileSync(filePath, content, 'utf-8');
+  });
+
+  ipcMain.handle('list-directory', async (_event, dirPath: string) => {
+    const entries = await fs.promises.readdir(dirPath, { withFileTypes: true });
+    return entries
+      .filter((e) => !e.name.startsWith('.'))
+      .sort((a, b) => {
+        if (a.isDirectory() && !b.isDirectory()) return -1;
+        if (!a.isDirectory() && b.isDirectory()) return 1;
+        return a.name.localeCompare(b.name);
+      })
+      .map((e) => ({
+        name: e.name,
+        path: path.join(dirPath, e.name),
+        isDirectory: e.isDirectory(),
+      }));
+  });
+
+  ipcMain.handle('read-text-file', async (_event, filePath: string) => {
+    const content = await fs.promises.readFile(filePath, 'utf-8');
+    return content;
+  });
+
+  ipcMain.handle('get-home-dir', () => {
+    return require('node:os').homedir();
+  });
+
+  ipcMain.handle('git-status', async (_event, repoPath: string) => {
+    const { execFile } = await import('node:child_process');
+    const { promisify } = await import('node:util');
+    const execFileAsync = promisify(execFile);
+    try {
+      const { stdout: branch } = await execFileAsync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], { cwd: repoPath });
+      const { stdout: status } = await execFileAsync('git', ['status', '--porcelain', '-u'], { cwd: repoPath });
+      const { stdout: log } = await execFileAsync('git', ['log', '--oneline', '-20'], { cwd: repoPath });
+      const files = status.trim().split('\n').filter(Boolean).map((line: string) => {
+        const status = line.substring(0, 2).trim();
+        const filePath = line.substring(3);
+        return { status, path: filePath };
+      });
+      const commits = log.trim().split('\n').filter(Boolean).map((line: string) => {
+        const spaceIdx = line.indexOf(' ');
+        return { hash: line.substring(0, spaceIdx), message: line.substring(spaceIdx + 1) };
+      });
+      return { branch: branch.trim(), files, commits };
+    } catch {
+      return null;
+    }
+  });
+
+  ipcMain.handle('git-diff', async (_event, repoPath: string, filePath: string) => {
+    const { execFile } = await import('node:child_process');
+    const { promisify } = await import('node:util');
+    const execFileAsync = promisify(execFile);
+    try {
+      const { stdout } = await execFileAsync('git', ['diff', 'HEAD', '--', filePath], { cwd: repoPath });
+      return stdout || '(no changes)';
+    } catch {
+      return null;
+    }
   });
 
   ipcMain.handle('close-window', () => {

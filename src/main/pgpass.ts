@@ -64,3 +64,46 @@ export function lookupPgpass(host: string, port: number, database: string, user:
 export function hasPgpassEntry(host: string, port: number, database: string, user: string): boolean {
   return lookupPgpass(host, port, database, user) !== null;
 }
+
+export interface PgpassEntry {
+  host: string;
+  port: number;
+  user: string;
+  database: string;
+}
+
+/**
+ * Parse all concrete (non-wildcard) entries from ~/.pgpass.
+ * Skips entries where host, port, database, or user is a wildcard,
+ * since those can't form a usable connection on their own.
+ */
+export function parsePgpassEntries(): PgpassEntry[] {
+  const pgpassPath = process.env.PGPASSFILE || path.join(os.homedir(), '.pgpass');
+  try {
+    const content = fs.readFileSync(pgpassPath, 'utf-8');
+    const entries: PgpassEntry[] = [];
+    const seen = new Set<string>();
+
+    for (const rawLine of content.split('\n')) {
+      const parts = parsePgpassLine(rawLine);
+      if (!parts) continue;
+
+      const [pHost, pPort, pDb, pUser] = parts;
+      // Skip wildcard entries — they can't define a concrete connection
+      if (pHost === '*' || pPort === '*' || pDb === '*' || pUser === '*') continue;
+
+      const port = parseInt(pPort, 10);
+      if (isNaN(port)) continue;
+
+      const key = `${pHost}:${port}:${pDb}:${pUser}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+
+      entries.push({ host: pHost, port, user: pUser, database: pDb });
+    }
+
+    return entries;
+  } catch {
+    return [];
+  }
+}

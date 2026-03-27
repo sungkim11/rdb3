@@ -14,8 +14,8 @@ test.afterAll(async () => {
 });
 
 test.describe('App Launch', () => {
-  test('window opens with rdb3 branding', async () => {
-    await expect(page.getByText('rdb3', { exact: true }).first()).toBeVisible();
+  test('window opens with PostGrip branding', async () => {
+    await expect(page.getByText('PostGrip', { exact: true }).first()).toBeVisible();
   });
 
   test('shows status bar with footer', async () => {

@@ -1,4 +1,4 @@
-import type { ActiveQuery, AlterTableAction, AppSnapshot, ConnectionInput, DdlResult, DmlOperation, EditableTableData, HostStats, ModifyTableInfo, QueryResult } from './types';
+import type { ActiveQuery, AlterTableAction, AppSnapshot, ConnectionInput, DdlResult, DmlOperation, EditableTableData, FileEntry, GitStatus, HostStats, ModifyTableInfo, PgpassEntry, QueryResult } from './types';
 
 interface ElectronAPI {
   bootstrap(): Promise<AppSnapshot>;
@@ -22,6 +22,12 @@ interface ElectronAPI {
   exportPgDump(schema: string, table: string, filePath: string, format: string): Promise<void>;
   showSaveDialog(options: { defaultPath?: string; filters?: Array<{ name: string; extensions: string[] }> }): Promise<string | null>;
   writeFile(filePath: string, content: string): Promise<void>;
+  getPgpassEntries(): Promise<PgpassEntry[]>;
+  listDirectory(dirPath: string): Promise<FileEntry[]>;
+  readTextFile(filePath: string): Promise<string>;
+  getHomeDir(): Promise<string>;
+  gitStatus(repoPath: string): Promise<GitStatus | null>;
+  gitDiff(repoPath: string, filePath: string): Promise<string | null>;
   closeWindow(): Promise<void>;
 }
 

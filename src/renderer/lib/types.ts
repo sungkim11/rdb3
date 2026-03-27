@@ -152,6 +152,35 @@ export interface AlterTableAction {
   newTableName?: string;
 }
 
+export interface GitFileStatus {
+  status: string;
+  path: string;
+}
+
+export interface GitCommit {
+  hash: string;
+  message: string;
+}
+
+export interface GitStatus {
+  branch: string;
+  files: GitFileStatus[];
+  commits: GitCommit[];
+}
+
+export interface FileEntry {
+  name: string;
+  path: string;
+  isDirectory: boolean;
+}
+
+export interface PgpassEntry {
+  host: string;
+  port: number;
+  user: string;
+  database: string;
+}
+
 export interface QueryResult {
   columns: string[];
   rows: string[][];

@@ -1,6 +1,6 @@
 {
-  "name": "rdb3",
-  "productName": "rdb3",
+  "name": "postgrip",
+  "productName": "PostGrip",
   "version": "0.1.1",
   "description": "Desktop PostgreSQL database client",
   "main": "dist/main/index.js",
@@ -24,14 +24,15 @@
     "dist:linux": "bun run build && electron-builder --linux --publish never"
   },
   "build": {
-    "appId": "com.rdb3.app",
-    "productName": "rdb3",
+    "appId": "com.postgrip.app",
+    "productName": "PostGrip",
     "directories": {
       "output": "release"
     },
     "files": [
       "dist/**/*",
       "node_modules/**/*",
+      "!node_modules/ssh2/lib/protocol/crypto/build",
       "package.json"
     ],
     "mac": {

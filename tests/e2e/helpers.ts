@@ -15,7 +15,7 @@ dotenv.config({ path: path.resolve(__dirname, '../../.env') });
  * touch the developer's real saved connections.
  */
 export async function launchApp(): Promise<{ app: ElectronApplication; page: Page }> {
-  const userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rdb3-e2e-'));
+  const userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'postgrip-e2e-'));
 
   const app = await electron.launch({
     args: [

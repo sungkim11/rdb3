@@ -168,7 +168,7 @@ describe.skipIf(!hasEnv)('live database tests', () => {
   });
 
   describe('CRUD lifecycle on temp table', () => {
-    const tempTable = '_rdb3_test_' + Date.now();
+    const tempTable = '_postgrip_test_' + Date.now();
 
     beforeAll(async () => {
       // Create a temporary test table

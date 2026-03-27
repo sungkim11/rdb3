@@ -3,7 +3,7 @@ import { vi } from 'vitest';
 // Mock Electron modules globally
 vi.mock('electron', () => ({
   app: {
-    getPath: vi.fn(() => '/tmp/rdb3-test'),
+    getPath: vi.fn(() => '/tmp/postgrip-test'),
     on: vi.fn(),
     quit: vi.fn(),
   },

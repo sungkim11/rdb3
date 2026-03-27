@@ -15,6 +15,9 @@ import type {
   KeyNode,
   ModifyTableColumn,
   ModifyTableInfo,
+  FileEntry,
+  GitStatus,
+  PgpassEntry,
   QueryResult,
   SafeSavedConnection,
   SchemaNode,
@@ -152,6 +155,7 @@ function errorMessage(err: unknown): string {
 
 export function AppShell() {
   const [snapshot, setSnapshot] = useState<AppSnapshot | null>(null);
+  const [pgpassEntries, setPgpassEntries] = useState<PgpassEntry[]>([]);
   const [queryHistory, setQueryHistory] = useState<QueryHistoryEntry[]>([]);
   const [loading, setLoading] = useState('Booting desktop shell...');
   const [error, setError] = useState<string | null>(null);
@@ -186,6 +190,12 @@ export function AppShell() {
   const [tpsHistory, setTpsHistory] = useState<number[]>([]);
   const [saturationHistory, setSaturationHistory] = useState<number[]>([]);
   const [cacheHitHistory, setCacheHitHistory] = useState<number[]>([]);
+  const [explorerTab, setExplorerTab] = useState<'database' | 'files' | 'git'>('database');
+  const [fileEntries, setFileEntries] = useState<FileEntry[]>([]);
+  const [currentDir, setCurrentDir] = useState<string>('');
+  const [expandedDirs, setExpandedDirs] = useState<Record<string, FileEntry[]>>({});
+  const [gitStatus, setGitStatus] = useState<GitStatus | null>(null);
+  const [gitRepoPath, setGitRepoPath] = useState<string>('');
 
   const activeEditorTab = useMemo(
     () => editorTabs.find((tab) => tab.id === activeEditorTabId) ?? editorTabs[0],
@@ -288,7 +298,57 @@ export function AppShell() {
 
   useEffect(() => {
     void refresh();
+    api.getPgpassEntries().then(setPgpassEntries).catch(() => {});
+    api.getHomeDir().then((home) => {
+      setCurrentDir(home);
+      setGitRepoPath(home);
+      api.listDirectory(home).then(setFileEntries).catch(() => {});
+      api.gitStatus(home).then(setGitStatus).catch(() => {});
+    }).catch(() => {});
   }, []);
+
+  async function browseDirectory(dirPath: string) {
+    try {
+      const entries = await api.listDirectory(dirPath);
+      setCurrentDir(dirPath);
+      setFileEntries(entries);
+      setExpandedDirs({});
+    } catch { /* ignore */ }
+  }
+
+  async function toggleSubDir(dirPath: string) {
+    if (expandedDirs[dirPath]) {
+      setExpandedDirs((prev) => { const next = { ...prev }; delete next[dirPath]; return next; });
+    } else {
+      try {
+        const entries = await api.listDirectory(dirPath);
+        setExpandedDirs((prev) => ({ ...prev, [dirPath]: entries }));
+      } catch { /* ignore */ }
+    }
+  }
+
+  async function openFileInTab(filePath: string, fileName: string) {
+    try {
+      const content = await api.readTextFile(filePath);
+      openNewQueryTab(content, fileName);
+    } catch { /* ignore */ }
+  }
+
+  async function refreshGitStatus() {
+    if (!gitRepoPath) return;
+    try {
+      const status = await api.gitStatus(gitRepoPath);
+      setGitStatus(status);
+    } catch { /* ignore */ }
+  }
+
+  async function openGitDiff(filePath: string) {
+    if (!gitRepoPath) return;
+    try {
+      const diff = await api.gitDiff(gitRepoPath, filePath);
+      if (diff) openNewQueryTab(diff, `diff: ${filePath.split('/').pop()}`);
+    } catch { /* ignore */ }
+  }
 
   useEffect(() => {
     if (!snapshot?.activeConnection) {
@@ -382,14 +442,14 @@ export function AppShell() {
     await api.closeWindow();
   }
 
-  function openNewQueryTab(sql = QUERY_PRESETS[0].sql) {
+  function openNewQueryTab(sql = QUERY_PRESETS[0].sql, title = 'sql-query.sql') {
     const id = makeTabId('query');
     setEditorTabs((current) => [
       ...current,
       {
         id,
         kind: 'query',
-        title: 'sql-query.sql',
+        title,
         sql,
         result: null,
         sortState: null,
@@ -522,6 +582,24 @@ export function AppShell() {
     setConnectionTab('general');
     setShowConnectionModal(true);
     setOpenMenu(null);
+  }
+
+  function openConnectionFromPgpass(entry: PgpassEntry) {
+    setDraft({
+      name: `${entry.database}@${entry.host}`,
+      host: entry.host,
+      port: entry.port,
+      user: entry.user,
+      password: '',
+      database: entry.database,
+      authMethod: 'pgpass',
+      ssh: { ...EMPTY_SSH },
+    });
+    setPersistConnection(true);
+    setTestStatus('idle');
+    setTestError('');
+    setConnectionTab('general');
+    setShowConnectionModal(true);
   }
 
   function openEditConnectionModal(connection: SafeSavedConnection) {
@@ -1191,25 +1269,25 @@ export function AppShell() {
   return (
     <main className="h-screen bg-transparent text-[13px] text-black" onClick={() => { if (openMenu) setOpenMenu(null); setContextMenu(null); setConnectionContextMenu(null); }}>
       <div className="flex h-screen flex-col overflow-hidden">
-        <header className="relative m-1.5 mb-0 shrink-0 overflow-hidden rounded-lg border border-white/20 bg-[#0f1a2e]/90 backdrop-blur-md">
+        <header className="glass-panel relative m-1.5 mb-0 shrink-0 overflow-hidden rounded-lg">
           <div className="flex h-7 items-center justify-between px-3">
             <div className="flex min-w-0 items-center gap-4" onClick={(event) => event.stopPropagation()}>
               <div className="rounded-md bg-[var(--accent)] px-2 py-[3px] text-[10px] font-bold uppercase tracking-[0.14em] text-white">
-                rdb3
+                PostGrip
               </div>
-              <div className="flex items-center gap-1 text-[12px] text-[var(--muted)]">
+              <div className="flex items-center gap-1 text-[12px] text-black/60">
                 <MenuButton active={openMenu === 'file'} label="File" onClick={() => setOpenMenu((current) => (current === 'file' ? null : 'file'))} />
                 <MenuButton active={false} label="SQL Editor" onClick={() => { openSqlEditor(); setOpenMenu(null); }} />
                 <MenuButton active={openMenu === 'view'} label="View" onClick={() => setOpenMenu((current) => (current === 'view' ? null : 'view'))} />
               </div>
             </div>
 
-            <div className="truncate text-[11px] uppercase tracking-[0.12em] text-[var(--muted)]">
+            <div className="truncate text-[11px] uppercase tracking-[0.12em] text-black/40">
               {snapshot?.activeConnection ? snapshot.activeConnection.database : 'No active database'}
             </div>
           </div>
 
-          <div className="flex items-center gap-1 bg-[#1e3a5f]/80 px-3 py-0.5 text-[var(--muted)]">
+          <div className="flex items-center gap-1 border-t border-black/5 bg-white px-3 py-0.5 text-black/50">
             <ToolbarIconButton onClick={openNewConnectionModal} title="New connection"><PlusIcon /></ToolbarIconButton>
             <ToolbarIconButton onClick={() => openNewQueryTab()} title="New query"><QueryIcon /></ToolbarIconButton>
             <ToolbarIconButton onClick={() => openSqlEditor()} title="Open SQL editor"><PanelIcon /></ToolbarIconButton>
@@ -1218,7 +1296,7 @@ export function AppShell() {
           </div>
 
           {openMenu ? (
-            <div className="absolute left-16 top-7 z-10 min-w-[220px] rounded-xl border border-white/20 bg-[#252526]/90 shadow-[0_8px_24px_rgba(0,0,0,0.3)] backdrop-blur-xl" onClick={(event) => event.stopPropagation()}>
+            <div className="context-menu absolute left-16 top-7 z-10 min-w-[220px] rounded-xl" onClick={(event) => event.stopPropagation()}>
               {openMenu === 'file' ? (
                 <MenuPanel>
                   <MenuItem label="Exit" onClick={() => void handleExit()} />
@@ -1256,9 +1334,25 @@ export function AppShell() {
                       );
                     })}
                   </div>
-                ) : (
-                  <EmptyInline message="No saved connections" />
-                )}
+                ) : null}
+                {(() => {
+                  const savedKeys = new Set((snapshot?.savedConnections ?? []).map((c) => `${c.host}:${c.port}:${c.database}:${c.user}`));
+                  const unsaved = pgpassEntries.filter((e) => !savedKeys.has(`${e.host}:${e.port}:${e.database}:${e.user}`));
+                  if (!unsaved.length) return !snapshot?.savedConnections.length ? <EmptyInline message="No saved connections" /> : null;
+                  return (
+                    <div>
+                      <div className="px-1 pb-1 pt-2 text-[10px] font-medium uppercase tracking-wider text-black/40">.pgpass</div>
+                      {unsaved.map((entry) => (
+                        <div className="group flex items-center gap-2 px-1 py-1" key={`${entry.host}:${entry.port}:${entry.database}:${entry.user}`}>
+                          <ExplorerIcon><PgpassIcon /></ExplorerIcon>
+                          <button className="min-w-0 flex-1 truncate text-left text-black/50" onClick={() => openConnectionFromPgpass(entry)} type="button">
+                            {`${entry.database}@${entry.host}`}
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  );
+                })()}
               </div>
             </div>
 
@@ -1268,23 +1362,84 @@ export function AppShell() {
               <div className="flex h-7 items-center justify-between border-b border-black/5 px-3">
                 <div className="text-[13px] font-medium text-black">Explorer</div>
                 <div className="flex items-center gap-1 text-gray-500">
-                  <ToolbarIconButton onClick={() => void refresh()} title="Refresh"><RefreshIcon /></ToolbarIconButton>
+                  {explorerTab === 'database' ? (
+                    <ToolbarIconButton onClick={() => void refresh()} title="Refresh"><RefreshIcon /></ToolbarIconButton>
+                  ) : explorerTab === 'files' ? (
+                    <ToolbarIconButton onClick={() => { if (currentDir) { const parent = currentDir.replace(/\/[^/]+$/, '') || '/'; void browseDirectory(parent); } }} title="Go up"><ChevronUpIcon /></ToolbarIconButton>
+                  ) : (
+                    <ToolbarIconButton onClick={() => void refreshGitStatus()} title="Refresh"><RefreshIcon /></ToolbarIconButton>
+                  )}
                   <ToolbarIconButton onClick={() => openSqlEditor()} title="Open SQL editor"><PanelIcon /></ToolbarIconButton>
                 </div>
               </div>
+              <div className="flex items-center border-b border-black/5 bg-white px-1 pt-1">
+                <button
+                  className={classNames(
+                    'flex items-center gap-1.5 border-r border-black/5 px-3 py-1.5 text-[12px] rounded-t-lg',
+                    explorerTab === 'database' ? 'bg-white text-black' : 'bg-gray-50 text-gray-400',
+                  )}
+                  onClick={() => setExplorerTab('database')}
+                  type="button"
+                >
+                  <span className="text-[11px] text-gray-500"><DatabaseIcon /></span>
+                  Database
+                </button>
+                <button
+                  className={classNames(
+                    'flex items-center gap-1.5 border-r border-black/5 px-3 py-1.5 text-[12px] rounded-t-lg',
+                    explorerTab === 'files' ? 'bg-white text-black' : 'bg-gray-50 text-gray-400',
+                  )}
+                  onClick={() => setExplorerTab('files')}
+                  type="button"
+                >
+                  <span className="text-[11px] text-gray-500"><FolderIcon /></span>
+                  Files
+                </button>
+                <button
+                  className={classNames(
+                    'flex items-center gap-1.5 border-r border-black/5 px-3 py-1.5 text-[12px] rounded-t-lg',
+                    explorerTab === 'git' ? 'bg-white text-black' : 'bg-gray-50 text-gray-400',
+                  )}
+                  onClick={() => { setExplorerTab('git'); void refreshGitStatus(); }}
+                  type="button"
+                >
+                  <span className="text-[11px] text-gray-500"><GitIcon /></span>
+                  Git
+                  {gitStatus && gitStatus.files.length > 0 ? (
+                    <span className="rounded-full bg-amber-100 px-1.5 text-[10px] font-medium text-amber-700">{gitStatus.files.length}</span>
+                  ) : null}
+                </button>
+              </div>
               <div className="sidebar-scroll min-h-0 flex-1 overflow-y-scroll rounded-b-xl bg-white px-2 py-2">
-                {snapshot?.activeConnection ? (
-                  <DatabaseTree
-                    connection={snapshot.activeConnection}
-                    tree={databaseTree}
-                    onPreview={handlePreviewTable}
-                    onTableContextMenu={(event, schema, table) => {
-                      event.preventDefault();
-                      setContextMenu({ x: event.clientX, y: event.clientY, schema, table });
-                    }}
+                {explorerTab === 'database' ? (
+                  snapshot?.activeConnection ? (
+                    <DatabaseTree
+                      connection={snapshot.activeConnection}
+                      tree={databaseTree}
+                      onPreview={handlePreviewTable}
+                      onTableContextMenu={(event, schema, table) => {
+                        event.preventDefault();
+                        setContextMenu({ x: event.clientX, y: event.clientY, schema, table });
+                      }}
+                    />
+                  ) : (
+                    <EmptyInline message="Connect to browse schema" />
+                  )
+                ) : explorerTab === 'files' ? (
+                  <FileTree
+                    entries={fileEntries}
+                    currentDir={currentDir}
+                    expandedDirs={expandedDirs}
+                    onNavigate={browseDirectory}
+                    onToggleDir={toggleSubDir}
+                    onOpenFile={openFileInTab}
                   />
                 ) : (
-                  <EmptyInline message="Connect to browse schema" />
+                  <GitPanel
+                    gitStatus={gitStatus}
+                    onOpenDiff={openGitDiff}
+                    onOpenFile={(filePath) => openFileInTab(gitRepoPath + '/' + filePath, filePath.split('/').pop() ?? filePath)}
+                  />
                 )}
               </div>
             </div>
@@ -2104,8 +2259,8 @@ function MenuButton({ active, label, onClick }: { active: boolean; label: string
   return (
     <button
       className={classNames(
-        'rounded-md px-2 py-1 text-[12px] text-[var(--muted)] hover:bg-white/10 hover:text-[var(--text)]',
-        active && 'bg-white/10 text-[var(--text)]',
+        'rounded-md px-2 py-1 text-[12px] text-black/60 hover:bg-black/5 hover:text-black',
+        active && 'bg-black/5 text-black',
       )}
       onClick={onClick}
       type="button"
@@ -2116,25 +2271,25 @@ function MenuButton({ active, label, onClick }: { active: boolean; label: string
 }
 
 function MenuPanel({ children }: PropsWithChildren) {
-  return <div className="py-1 text-[12px] text-[var(--text)]">{children}</div>;
+  return <div className="py-1 text-[12px] text-black">{children}</div>;
 }
 
 function MenuItem({ label, shortcut, onClick }: { label: string; shortcut?: string; onClick: () => void }) {
   return (
     <button
-      className="flex w-full items-center justify-between px-3 py-1.5 text-left text-[var(--text)] hover:bg-[var(--selection)]"
+      className="flex w-full items-center justify-between px-3 py-1.5 text-left text-black hover:bg-black/5"
       onClick={onClick}
       type="button"
     >
       <span>{label}</span>
-      {shortcut ? <span className="ml-6 text-[11px] text-[var(--muted)]">{shortcut}</span> : null}
+      {shortcut ? <span className="ml-6 text-[11px] text-black/40">{shortcut}</span> : null}
     </button>
   );
 }
 
 function ToolbarIconButton({ children, onClick, title }: PropsWithChildren<{ onClick: () => void; title: string }>) {
   return (
-    <button className="grid h-6 w-6 place-items-center rounded-md border border-transparent text-[12px] text-[var(--muted)] hover:border-white/20 hover:bg-white/10" onClick={onClick} title={title} type="button">
+    <button className="grid h-6 w-6 place-items-center rounded-md border border-transparent text-[12px] text-black/50 hover:border-black/10 hover:bg-black/5 hover:text-black/70" onClick={onClick} title={title} type="button">
       {children}
     </button>
   );
@@ -2386,6 +2541,113 @@ function DatabaseTree({ connection, tree, onPreview, onTableContextMenu }: { con
   );
 }
 
+function FileTree({ entries, currentDir, expandedDirs, onNavigate, onToggleDir, onOpenFile }: {
+  entries: FileEntry[];
+  currentDir: string;
+  expandedDirs: Record<string, FileEntry[]>;
+  onNavigate: (path: string) => void;
+  onToggleDir: (path: string) => void;
+  onOpenFile: (path: string, name: string) => void;
+}) {
+  const dirName = currentDir.split('/').pop() || '/';
+
+  function renderEntries(items: FileEntry[], depth: number) {
+    return items.map((entry) => {
+      const expanded = !!expandedDirs[entry.path];
+      return (
+        <div key={entry.path}>
+          <button
+            className="flex w-full items-center gap-2 py-1 text-left hover:bg-white/40"
+            style={{ paddingLeft: `${depth * 16 + 8}px` }}
+            onClick={() => entry.isDirectory ? onToggleDir(entry.path) : onOpenFile(entry.path, entry.name)}
+            onDoubleClick={() => entry.isDirectory ? onNavigate(entry.path) : undefined}
+            type="button"
+          >
+            {entry.isDirectory ? (
+              <span className="w-4 shrink-0 text-center text-gray-500">{expanded ? '\u25BE' : '\u25B8'}</span>
+            ) : (
+              <span className="w-4 shrink-0" />
+            )}
+            <ExplorerIcon>{entry.isDirectory ? <FolderIcon /> : <FileIcon />}</ExplorerIcon>
+            <span className="flex-1 truncate text-black">{entry.name}</span>
+          </button>
+          {expanded && expandedDirs[entry.path] ? renderEntries(expandedDirs[entry.path], depth + 1) : null}
+        </div>
+      );
+    });
+  }
+
+  return (
+    <div className="overflow-auto">
+      <div className="mb-1 truncate px-2 text-[10px] text-black/40">{currentDir}</div>
+      {entries.length === 0 ? (
+        <EmptyInline message="Empty directory" />
+      ) : (
+        renderEntries(entries, 0)
+      )}
+    </div>
+  );
+}
+
+function GitPanel({ gitStatus, onOpenDiff, onOpenFile }: {
+  gitStatus: GitStatus | null;
+  onOpenDiff: (filePath: string) => void;
+  onOpenFile: (filePath: string) => void;
+}) {
+  if (!gitStatus) return <EmptyInline message="Not a git repository" />;
+
+  const statusLabel: Record<string, string> = {
+    M: 'Modified', A: 'Added', D: 'Deleted', R: 'Renamed', '??': 'Untracked', U: 'Unmerged',
+    MM: 'Modified', AM: 'Added', AD: 'Added',
+  };
+  const statusColor: Record<string, string> = {
+    M: 'text-amber-600', A: 'text-green-600', D: 'text-red-500', '??': 'text-gray-400', U: 'text-purple-500',
+    MM: 'text-amber-600', AM: 'text-green-600', AD: 'text-green-600',
+  };
+
+  return (
+    <div className="overflow-auto">
+      <div className="mb-2 flex items-center gap-2 px-1">
+        <span className="text-[11px] text-gray-500"><GitIcon /></span>
+        <span className="text-[12px] font-medium text-black">{gitStatus.branch}</span>
+      </div>
+
+      {gitStatus.files.length > 0 ? (
+        <div className="mb-3">
+          <div className="px-1 pb-1 text-[10px] font-medium uppercase tracking-wider text-black/40">Changes ({gitStatus.files.length})</div>
+          {gitStatus.files.map((file) => (
+            <div className="group flex items-center gap-2 px-1 py-0.5" key={file.path}>
+              <span className={`shrink-0 text-[10px] font-mono font-bold ${statusColor[file.status] ?? 'text-gray-500'}`}>
+                {file.status}
+              </span>
+              <button className="min-w-0 flex-1 truncate text-left text-[12px] text-black" onClick={() => file.status === '??' ? onOpenFile(file.path) : onOpenDiff(file.path)} type="button">
+                {file.path}
+              </button>
+              <span className="hidden text-[10px] text-gray-400 group-hover:inline">
+                {statusLabel[file.status] ?? file.status}
+              </span>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div className="mb-3 px-1 text-[12px] text-gray-400">Working tree clean</div>
+      )}
+
+      {gitStatus.commits.length > 0 ? (
+        <div>
+          <div className="px-1 pb-1 text-[10px] font-medium uppercase tracking-wider text-black/40">Recent Commits</div>
+          {gitStatus.commits.map((commit) => (
+            <div className="flex items-center gap-2 px-1 py-0.5" key={commit.hash}>
+              <span className="shrink-0 font-mono text-[10px] text-[var(--accent)]">{commit.hash}</span>
+              <span className="min-w-0 flex-1 truncate text-[12px] text-black">{commit.message}</span>
+            </div>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function ResultsTable({
   result,
   sortState,
@@ -2397,18 +2659,53 @@ function ResultsTable({
   onSort: (columnIndex: number) => void;
   rowOffset?: number;
 }) {
+  const [colWidths, setColWidths] = useState<Record<number, number>>({});
+
+  function startResize(e: React.PointerEvent, colIndex: number) {
+    e.preventDefault();
+    e.stopPropagation();
+    const th = (e.target as HTMLElement).closest('th');
+    const startX = e.clientX;
+    const startWidth = colWidths[colIndex] ?? th?.offsetWidth ?? 150;
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+
+    function onMove(ev: PointerEvent) {
+      const newWidth = Math.max(60, startWidth + ev.clientX - startX);
+      setColWidths((prev) => ({ ...prev, [colIndex]: newWidth }));
+    }
+    function onUp() {
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+    }
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+  }
+
+  const DEFAULT_COL_WIDTH = 150;
+  const ROW_NUM_WIDTH = 48;
+  const totalWidth = ROW_NUM_WIDTH + result.columns.reduce((sum, _, i) => sum + (colWidths[i] ?? DEFAULT_COL_WIDTH), 0);
+
   return (
     <div className="bg-transparent">
       {result.notice ? <div className="border-b border-black/5 bg-blue-50/60 px-4 py-2 text-sm text-blue-700">{result.notice}</div> : null}
       <div>
-        <table className="min-w-full border-collapse font-sans text-[12px]">
+        <table className="border-collapse font-sans text-[12px]" style={{ tableLayout: 'fixed', width: totalWidth }}>
+          <colgroup>
+            <col style={{ width: ROW_NUM_WIDTH }} />
+            {result.columns.map((_, i) => (
+              <col key={i} style={{ width: colWidths[i] ?? DEFAULT_COL_WIDTH }} />
+            ))}
+          </colgroup>
           <thead className="sticky top-0 z-[1] bg-white/60 backdrop-blur-sm text-left text-black">
             <tr>
-              <th className="w-12 border-b border-r border-black/8 px-2 py-1 font-medium text-right">#</th>
+              <th className="border-b border-r border-black/8 px-2 py-1 font-medium text-right">#</th>
               {result.columns.map((column, index) => (
                 <th className="relative border-b border-r border-black/8 px-2 py-1 font-medium" key={column}>
                   <div className="flex items-center gap-1">
-                    <button className="flex-1 text-left" onClick={() => onSort(index)} type="button">
+                    <button className="flex-1 truncate text-left" onClick={() => onSort(index)} type="button">
                       {column}
                     </button>
                     <span className="shrink-0 scale-75 text-gray-400"><FilterIcon /></span>
@@ -2417,6 +2714,13 @@ function ResultsTable({
                       <span className={classNames('-mt-[2px]', sortState?.columnIndex === index && sortState.direction === 'desc' ? 'text-black' : 'text-white')} style={{ WebkitTextStroke: '0.3px #888' }}>&#9660;</span>
                     </button>
                   </div>
+                  <div
+                    className="absolute -right-2 top-0 z-[2] h-full w-4 cursor-col-resize"
+                    style={{ borderRight: '2px solid transparent' }}
+                    onPointerDown={(e) => startResize(e, index)}
+                    onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.borderRightColor = 'var(--accent)'; }}
+                    onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.borderRightColor = 'transparent'; }}
+                  />
                 </th>
               ))}
             </tr>
@@ -2426,7 +2730,7 @@ function ResultsTable({
               <tr key={`${rowIndex}-${row.join('|')}`}>
                 <td className="border-b border-r border-black/8 px-2 py-0.5 text-right text-gray-400">{rowOffset + rowIndex + 1}</td>
                 {row.map((cell, cellIndex) => (
-                  <td className="max-w-[400px] border-b border-r border-black/8 px-2 py-0.5 text-black" key={`${rowIndex}-${cellIndex}`}>
+                  <td className="border-b border-r border-black/8 px-2 py-0.5 text-black" key={`${rowIndex}-${cellIndex}`}>
                     <div className="overflow-hidden text-ellipsis whitespace-nowrap">{cell}</div>
                   </td>
                 ))}
@@ -2444,8 +2748,12 @@ function PlusIcon() { return <IconBase><path d="M8 3v10M3 8h10" stroke="currentC
 function RefreshIcon() { return <IconBase><path d="M13 5V2.5H10.5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" /><path d="M13 2.5A5.5 5.5 0 1 0 14 8" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" /></IconBase>; }
 function PanelIcon() { return <IconBase><path d="M2.5 3.5h11v9h-11z" stroke="currentColor" strokeWidth="1.2" /><path d="M6 3.5v9" stroke="currentColor" strokeWidth="1.2" /></IconBase>; }
 function ConnectionIcon({ active }: { active: boolean }) { return <IconBase><circle cx="8" cy="8" r="4.6" stroke="currentColor" strokeWidth="1.2" /><circle cx="8" cy="8" r="2" fill={active ? 'currentColor' : 'none'} stroke="currentColor" strokeWidth="1.1" /></IconBase>; }
+function PgpassIcon() { return <IconBase><rect x="3" y="5" width="10" height="7" rx="1" stroke="currentColor" strokeWidth="1.2" /><path d="M6 5V3.5a2 2 0 0 1 4 0V5" stroke="currentColor" strokeWidth="1.2" /><circle cx="8" cy="9" r="1" fill="currentColor" /></IconBase>; }
 function DatabaseIcon() { return <IconBase><ellipse cx="8" cy="4" rx="4.5" ry="2" stroke="currentColor" strokeWidth="1.2" /><path d="M3.5 4v6c0 1.1 2 2 4.5 2s4.5-.9 4.5-2V4" stroke="currentColor" strokeWidth="1.2" /></IconBase>; }
 function FolderIcon() { return <IconBase><path d="M2.5 5h4l1.2-1.5h5.8v8H2.5z" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" /></IconBase>; }
+function FileIcon() { return <IconBase><path d="M4 2.5h5l3 3v8H4z" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" /><path d="M9 2.5v3h3" stroke="currentColor" strokeWidth="1.2" /></IconBase>; }
+function ChevronUpIcon() { return <IconBase><path d="M4 10l4-4 4 4" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" /></IconBase>; }
+function GitIcon() { return <IconBase><circle cx="5" cy="4.5" r="1.5" stroke="currentColor" strokeWidth="1.2" /><circle cx="11" cy="4.5" r="1.5" stroke="currentColor" strokeWidth="1.2" /><circle cx="5" cy="11.5" r="1.5" stroke="currentColor" strokeWidth="1.2" /><path d="M5 6v4M6.5 4.5h3" stroke="currentColor" strokeWidth="1.2" /></IconBase>; }
 function TableIcon() { return <IconBase><rect x="2.5" y="3" width="11" height="10" stroke="currentColor" strokeWidth="1.2" /><path d="M2.5 6.5h11M2.5 10h11M6 3v10M9.8 3v10" stroke="currentColor" strokeWidth="1" /></IconBase>; }
 function QueryIcon() { return <IconBase><path d="M4 4.5h8M4 8h8M4 11.5h5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" /></IconBase>; }
 function ExportIcon() { return <IconBase><path d="M8 2.5v7M5.5 7l2.5 2.5L10.5 7" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" /><path d="M3 12.5h10" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" /></IconBase>; }
