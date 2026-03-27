@@ -61,6 +61,37 @@ PostGrip is a fast, lightweight desktop client for PostgreSQL. Browse schemas, w
 - **Modify Table** — rename table, add/drop/rename columns, change types and defaults with live DDL preview
 - **Truncate / Drop Table** — with confirmation dialog and optional CASCADE
 
+### Backup & Restore
+Full database backup management built into the app:
+
+- **Backup Now** — on-demand backups via `pg_dump` with a full options modal:
+  - Format selection: Tar, Custom (pg_restore), Plain SQL, Directory
+  - Scope: entire database or selected schemas/tables via tree view with checkboxes
+  - Content: schema + data, schema only, or data only
+  - Options: no owner, no privileges, clean (DROP), CREATE DATABASE, IF EXISTS
+  - Compression level slider (for custom/directory formats)
+  - Editable output file path with browse button
+- **Schedule Backup** — automated recurring backups:
+  - Day picker (Sunday through Saturday)
+  - Time picker for start time
+  - Same format, scope, content, and options as manual backups
+  - Schedules run automatically when the app is open
+  - Modify or delete existing schedules
+- **Backup History** — table of all backups with:
+  - Status: In Progress (animated), Successful, Failed
+  - File size, duration, and full file path
+  - Expandable rows showing complete backup metadata and options used
+  - Delete and Restore actions per backup
+- **Restore** — restore from any backup in the history:
+  - `.sql` files executed directly against the database
+  - `.dump` and `.tar` files restored via `pg_restore`
+- **Configurable backup directory** — change where backups are stored, persisted across sessions
+- **Auto-detection** of `pg_dump`/`pg_restore` in common Homebrew and Linux paths
+
+### Help
+- **Help** menu with a built-in markdown user guide
+- **About** dialog showing version, Electron, Node.js, Chromium, and platform info
+
 ## Tech Stack
 
 | Layer | Technology |
