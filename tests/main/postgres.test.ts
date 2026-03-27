@@ -468,4 +468,113 @@ describe('postgres', () => {
       expect(queries.some((q) => q.sql.includes('"public"."users"'))).toBe(true);
     });
   });
+
+  describe('executeDml with typed columns', () => {
+    it('casts JSON columns', async () => {
+      await postgres.executeDml(conn, 'public', 'users', [
+        { type: 'insert', values: { data: '{"key":"val"}' }, columnTypes: { data: 'jsonb' } },
+      ]);
+      const insertQuery = queries.find((q) => q.sql.includes('INSERT'));
+      expect(insertQuery?.sql).toContain('::jsonb');
+    });
+
+    it('casts array columns', async () => {
+      await postgres.executeDml(conn, 'public', 'users', [
+        { type: 'insert', values: { tags: '{a,b}' }, columnTypes: { tags: 'text[]' } },
+      ]);
+      const insertQuery = queries.find((q) => q.sql.includes('INSERT'));
+      expect(insertQuery?.sql).toContain('::text[]');
+    });
+
+    it('converts JSON array syntax to PG array literal', async () => {
+      await postgres.executeDml(conn, 'public', 'users', [
+        { type: 'insert', values: { tags: '["a","b"]' }, columnTypes: { tags: 'text[]' } },
+      ]);
+      const insertQuery = queries.find((q) => q.sql.includes('INSERT'));
+      expect(insertQuery?.params?.[0]).toBe('{a,b}');
+    });
+
+    it('handles NULL values in insert', async () => {
+      await postgres.executeDml(conn, 'public', 'users', [
+        { type: 'insert', values: { name: null } },
+      ]);
+      const insertQuery = queries.find((q) => q.sql.includes('INSERT'));
+      expect(insertQuery?.params).toContain(null);
+    });
+  });
+
+  describe('getTableDdl', () => {
+    it('returns DDL string', async () => {
+      queryResponses.set('pg_class c JOIN pg_namespace', {
+        rows: [{ oid: 12345 }],
+      });
+      queryResponses.set('pg_attribute', {
+        rows: [
+          { attname: 'id', data_type: 'integer', attnotnull: true, default_expr: null },
+        ],
+      });
+      const ddl = await postgres.getTableDdl(conn, 'public', 'users');
+      expect(typeof ddl).toBe('string');
+      expect(ddl).toContain('create table');
+      expect(mockClient.release).toHaveBeenCalled();
+    });
+  });
+
+  describe('getEditableTableData', () => {
+    it('returns columns, types, rows, and primary keys', async () => {
+      // getPrimaryKeyColumns sub-call
+      queryResponses.set('indisprimary', {
+        rows: [{ attname: 'id' }],
+      });
+      // count query
+      queryResponses.set('count', {
+        rows: [{ cnt: 2 }],
+      });
+      // data query
+      queryResponses.set('SELECT * FROM', {
+        rows: [
+          { id: 1, name: 'Alice' },
+          { id: 2, name: 'Bob' },
+        ],
+        fields: [{ name: 'id' }, { name: 'name' }],
+      });
+      // type query
+      queryResponses.set('format_type', {
+        rows: [
+          { attname: 'id', data_type: 'integer' },
+          { attname: 'name', data_type: 'text' },
+        ],
+      });
+
+      const result = await postgres.getEditableTableData(conn, 'public', 'users', 100, 0);
+      expect(result.columns).toBeDefined();
+      expect(result.totalCount).toBe(2);
+      expect(result.primaryKeyColumns).toBeDefined();
+    });
+  });
+
+  describe('getHostStats with delta tracking', () => {
+    it('returns null TPS on first call (no previous snapshot)', async () => {
+      postgres.closeAllPools(); // reset delta counters
+      queryResponses.set('pg_database_size', {
+        rows: [{ db_size: 0, active: 1, max_conn: 100, txn: 500, uptime: '1 days 02:30:00', cache_ratio: 99.5 }],
+      });
+      const stats = await postgres.getHostStats(conn);
+      expect(stats.tps).toBeNull();
+    });
+
+    it('parses uptime with days', async () => {
+      queryResponses.set('pg_database_size', {
+        rows: [{ db_size: 0, active: 1, max_conn: 100, txn: 0, uptime: '5 days 12:30:45.123', cache_ratio: 0 }],
+      });
+      const stats = await postgres.getHostStats(conn);
+      expect(stats.uptime).toBe('5d 12h 30m');
+    });
+  });
+
+  describe('closeAllPools', () => {
+    it('is callable without error', () => {
+      expect(() => postgres.closeAllPools()).not.toThrow();
+    });
+  });
 });

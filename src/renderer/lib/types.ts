@@ -168,6 +168,11 @@ export interface GitStatus {
   commits: GitCommit[];
 }
 
+export interface GitRepo {
+  name: string;
+  path: string;
+}
+
 export interface FileEntry {
   name: string;
   path: string;

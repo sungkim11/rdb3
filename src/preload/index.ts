@@ -43,6 +43,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   listDirectory: (dirPath: string) => ipcRenderer.invoke('list-directory', dirPath),
   readTextFile: (filePath: string) => ipcRenderer.invoke('read-text-file', filePath),
   getHomeDir: () => ipcRenderer.invoke('get-home-dir'),
+  findGitRepos: (dirPath: string) => ipcRenderer.invoke('find-git-repos', dirPath),
+  gitRepoRoot: (dirPath: string) => ipcRenderer.invoke('git-repo-root', dirPath),
   gitStatus: (repoPath: string) => ipcRenderer.invoke('git-status', repoPath),
   gitDiff: (repoPath: string, filePath: string) => ipcRenderer.invoke('git-diff', repoPath, filePath),
   closeWindow: () => ipcRenderer.invoke('close-window'),

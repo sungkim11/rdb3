@@ -26,8 +26,32 @@ vi.mock('../../src/main/storage', () => ({
 }));
 
 vi.mock('node:fs', () => ({
-  default: { writeFileSync: vi.fn() },
+  default: {
+    writeFileSync: vi.fn(),
+    promises: {
+      readdir: vi.fn().mockResolvedValue([]),
+      readFile: vi.fn().mockResolvedValue('file content'),
+    },
+  },
   writeFileSync: vi.fn(),
+}));
+
+vi.mock('node:os', () => ({
+  default: { homedir: vi.fn().mockReturnValue('/home/testuser') },
+  homedir: vi.fn().mockReturnValue('/home/testuser'),
+}));
+
+vi.mock('node:child_process', () => ({
+  execFile: vi.fn(),
+}));
+
+vi.mock('node:util', () => ({
+  promisify: vi.fn().mockReturnValue(vi.fn().mockResolvedValue({ stdout: '', stderr: '' })),
+}));
+
+vi.mock('../../src/main/pgpass', () => ({
+  lookupPgpass: vi.fn().mockReturnValue(null),
+  parsePgpassEntries: vi.fn().mockReturnValue([]),
 }));
 
 import { registerIpcHandlers } from '../../src/main/ipc';
@@ -61,6 +85,7 @@ describe('IPC handlers', () => {
   it('registers all expected IPC handlers', () => {
     const expectedChannels = [
       'bootstrap',
+      'get-pgpass-entries',
       'host-stats',
       'active-queries',
       'test-connection',
@@ -81,6 +106,13 @@ describe('IPC handlers', () => {
       'export-pg-dump',
       'show-save-dialog',
       'write-file',
+      'list-directory',
+      'read-text-file',
+      'get-home-dir',
+      'find-git-repos',
+      'git-repo-root',
+      'git-status',
+      'git-diff',
       'close-window',
     ];
     for (const channel of expectedChannels) {
@@ -215,6 +247,127 @@ describe('IPC handlers', () => {
       const fs = await import('node:fs');
       await invoke('write-file', '/tmp/test.sql', 'SELECT 1;');
       expect(fs.default.writeFileSync).toHaveBeenCalledWith('/tmp/test.sql', 'SELECT 1;', 'utf-8');
+    });
+  });
+
+  describe('get-pgpass-entries', () => {
+    it('returns parsed pgpass entries', async () => {
+      const { parsePgpassEntries } = await import('../../src/main/pgpass');
+      vi.mocked(parsePgpassEntries).mockReturnValue([
+        { host: 'localhost', port: 5432, user: 'admin', database: 'mydb' },
+      ]);
+      const result = await invoke('get-pgpass-entries') as Array<{ host: string }>;
+      expect(result).toHaveLength(1);
+      expect(result[0].host).toBe('localhost');
+    });
+  });
+
+  describe('get-home-dir', () => {
+    it('returns home directory', async () => {
+      const result = await invoke('get-home-dir');
+      expect(result).toBe('/home/testuser');
+    });
+  });
+
+  describe('list-directory', () => {
+    it('returns directory entries', async () => {
+      const fs = await import('node:fs');
+      vi.mocked(fs.default.promises.readdir).mockResolvedValue([
+        { name: 'folder', isDirectory: () => true, isFile: () => false } as never,
+        { name: 'file.txt', isDirectory: () => false, isFile: () => true } as never,
+        { name: '.hidden', isDirectory: () => false, isFile: () => true } as never,
+      ]);
+      const result = await invoke('list-directory', '/test') as Array<{ name: string; isDirectory: boolean }>;
+      // hidden files should be filtered
+      expect(result).toHaveLength(2);
+      // directories should sort first
+      expect(result[0].name).toBe('folder');
+      expect(result[0].isDirectory).toBe(true);
+      expect(result[1].name).toBe('file.txt');
+    });
+  });
+
+  describe('read-text-file', () => {
+    it('returns file content', async () => {
+      const fs = await import('node:fs');
+      vi.mocked(fs.default.promises.readFile).mockResolvedValue('SELECT 1;');
+      const result = await invoke('read-text-file', '/test/query.sql');
+      expect(result).toBe('SELECT 1;');
+    });
+  });
+
+  describe('disconnect', () => {
+    it('calls closeAllPools', async () => {
+      appState.activeConnection = {
+        id: '1', name: 'x', host: 'h', port: 5432, user: 'u', password: 'p', database: 'd',
+      };
+      await invoke('disconnect');
+      expect(postgres.closeAllPools).toHaveBeenCalled();
+    });
+  });
+
+  describe('active-queries', () => {
+    it('throws without connection', async () => {
+      await expect(invoke('active-queries')).rejects.toThrow('No active database connection');
+    });
+
+    it('delegates to postgres.getActiveQueries', async () => {
+      appState.activeConnection = {
+        id: '1', name: 'test', host: 'localhost', port: 5432, user: 'pg', password: 'pw', database: 'db',
+      };
+      await invoke('active-queries');
+      expect(postgres.getActiveQueries).toHaveBeenCalledWith(appState.activeConnection);
+    });
+  });
+
+  describe('export-table-csv', () => {
+    it('throws without connection', async () => {
+      await expect(invoke('export-table-csv', 'public', 'users', '/tmp/out.csv')).rejects.toThrow('No active database connection');
+    });
+
+    it('delegates to postgres.exportTableCsv', async () => {
+      appState.activeConnection = {
+        id: '1', name: 'test', host: 'localhost', port: 5432, user: 'pg', password: 'pw', database: 'db',
+      };
+      await invoke('export-table-csv', 'public', 'users', '/tmp/out.csv');
+      expect(postgres.exportTableCsv).toHaveBeenCalledWith(appState.activeConnection, 'public', 'users', '/tmp/out.csv');
+    });
+  });
+
+  describe('get-editable-table-data', () => {
+    it('throws without connection', async () => {
+      await expect(invoke('get-editable-table-data', 'public', 'users', 100, 0)).rejects.toThrow('No active database connection');
+    });
+  });
+
+  describe('execute-dml', () => {
+    it('throws without connection', async () => {
+      await expect(invoke('execute-dml', 'public', 'users', [])).rejects.toThrow('No active database connection');
+    });
+  });
+
+  describe('get-modify-table-info', () => {
+    it('throws without connection', async () => {
+      await expect(invoke('get-modify-table-info', 'public', 'users')).rejects.toThrow('No active database connection');
+    });
+  });
+
+  describe('alter-table', () => {
+    it('throws without connection', async () => {
+      await expect(invoke('alter-table', 'public', 'users', [])).rejects.toThrow('No active database connection');
+    });
+  });
+
+  describe('export-pg-dump', () => {
+    it('throws without connection', async () => {
+      await expect(invoke('export-pg-dump', 'public', 'users', '/tmp/dump.sql', 'sql')).rejects.toThrow('No active database connection');
+    });
+  });
+
+  describe('activate-saved-connection', () => {
+    it('throws when connection not found', async () => {
+      vi.mocked(loadConnections).mockReturnValue([]);
+      await expect(invoke('activate-saved-connection', 'nonexistent')).rejects.toThrow('Saved connection not found');
     });
   });
 });

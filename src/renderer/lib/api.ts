@@ -1,4 +1,4 @@
-import type { ActiveQuery, AlterTableAction, AppSnapshot, ConnectionInput, DdlResult, DmlOperation, EditableTableData, FileEntry, GitStatus, HostStats, ModifyTableInfo, PgpassEntry, QueryResult } from './types';
+import type { ActiveQuery, AlterTableAction, AppSnapshot, ConnectionInput, DdlResult, DmlOperation, EditableTableData, FileEntry, GitRepo, GitStatus, HostStats, ModifyTableInfo, PgpassEntry, QueryResult } from './types';
 
 interface ElectronAPI {
   bootstrap(): Promise<AppSnapshot>;
@@ -26,6 +26,8 @@ interface ElectronAPI {
   listDirectory(dirPath: string): Promise<FileEntry[]>;
   readTextFile(filePath: string): Promise<string>;
   getHomeDir(): Promise<string>;
+  findGitRepos(dirPath: string): Promise<GitRepo[]>;
+  gitRepoRoot(dirPath: string): Promise<string | null>;
   gitStatus(repoPath: string): Promise<GitStatus | null>;
   gitDiff(repoPath: string, filePath: string): Promise<string | null>;
   closeWindow(): Promise<void>;

@@ -16,6 +16,7 @@ import type {
   ModifyTableColumn,
   ModifyTableInfo,
   FileEntry,
+  GitRepo,
   GitStatus,
   PgpassEntry,
   QueryResult,
@@ -196,6 +197,7 @@ export function AppShell() {
   const [expandedDirs, setExpandedDirs] = useState<Record<string, FileEntry[]>>({});
   const [gitStatus, setGitStatus] = useState<GitStatus | null>(null);
   const [gitRepoPath, setGitRepoPath] = useState('');
+  const [gitRepos, setGitRepos] = useState<GitRepo[]>([]);
 
   const activeEditorTab = useMemo(
     () => editorTabs.find((tab) => tab.id === activeEditorTabId) ?? editorTabs[0],
@@ -306,11 +308,14 @@ export function AppShell() {
     api.getPgpassEntries().then(setPgpassEntries).catch(() => {});
     api.getHomeDir().then((home) => {
       setCurrentDir(home);
-      setGitRepoPath(home);
-      Promise.all([
-        api.listDirectory(home).then(setFileEntries),
-        api.gitStatus(home).then(setGitStatus),
-      ]).catch(() => {});
+      api.listDirectory(home).then(setFileEntries).catch(() => {});
+      api.findGitRepos(home).then(setGitRepos).catch(() => {});
+      api.gitRepoRoot(home).then((root) => {
+        if (root) {
+          setGitRepoPath(root);
+          api.gitStatus(root).then(setGitStatus).catch(() => {});
+        }
+      }).catch(() => {});
     }).catch(() => {});
   }, []);
 
@@ -320,6 +325,15 @@ export function AppShell() {
       setCurrentDir(dirPath);
       setFileEntries(entries);
       setExpandedDirs({});
+      api.gitRepoRoot(dirPath).then((root) => {
+        if (root) {
+          setGitRepoPath(root);
+          api.gitStatus(root).then(setGitStatus).catch(() => {});
+        } else {
+          setGitRepoPath('');
+          setGitStatus(null);
+        }
+      }).catch(() => {});
     } catch { /* ignore */ }
   }
 
@@ -334,11 +348,30 @@ export function AppShell() {
     }
   }
 
+  function openSqlFileInEditor(content: string, title: string) {
+    const id = makeTabId('sql');
+    setSqlTabs((tabs) => [...tabs, { id, title, sql: content }]);
+    setActiveSqlTabId(id);
+    setShowSqlEditor(true);
+  }
+
   async function openFileInTab(filePath: string, fileName: string) {
     try {
       const content = await api.readTextFile(filePath);
-      openNewQueryTab(content, fileName);
+      if (fileName.endsWith('.sql')) {
+        openSqlFileInEditor(content, fileName);
+      } else {
+        openNewQueryTab(content, fileName);
+      }
     } catch { /* ignore */ }
+  }
+
+  async function switchGitRepo(repoPath: string) {
+    setGitRepoPath(repoPath);
+    try {
+      const status = await api.gitStatus(repoPath);
+      setGitStatus(status);
+    } catch { setGitStatus(null); }
   }
 
   async function refreshGitStatus() {
@@ -1444,8 +1477,11 @@ export function AppShell() {
                 ) : (
                   <GitPanel
                     gitStatus={gitStatus}
+                    gitRepoPath={gitRepoPath}
+                    gitRepos={gitRepos}
+                    onSwitchRepo={switchGitRepo}
                     onOpenDiff={openGitDiff}
-                    onOpenFile={(filePath) => openFileInTab(gitRepoPath + '/' + filePath, filePath.split('/').pop() ?? filePath)}
+                    onOpenFile={openFileInTab}
                   />
                 )}
               </div>
@@ -2603,52 +2639,133 @@ const GIT_STATUS_COLOR: Record<string, string> = {
   MM: 'text-amber-600', AM: 'text-green-600', AD: 'text-green-600',
 };
 
-function GitPanel({ gitStatus, onOpenDiff, onOpenFile }: {
+function GitPanel({ gitStatus, gitRepoPath, gitRepos, onSwitchRepo, onOpenDiff, onOpenFile }: {
   gitStatus: GitStatus | null;
+  gitRepoPath: string;
+  gitRepos: GitRepo[];
+  onSwitchRepo: (repoPath: string) => void;
   onOpenDiff: (filePath: string) => void;
-  onOpenFile: (filePath: string) => void;
+  onOpenFile: (filePath: string, fileName: string) => void;
 }) {
-  if (!gitStatus) return <EmptyInline message="Not a git repository" />;
+  const [repoFiles, setRepoFiles] = useState<Record<string, FileEntry[]>>({});
+  const [expandedRepoDirs, setExpandedRepoDirs] = useState<Record<string, FileEntry[]>>({});
+  const [openRepos, setOpenRepos] = useState<Set<string>>(new Set());
+
+  async function toggleRepo(repoPath: string) {
+    onSwitchRepo(repoPath);
+    if (openRepos.has(repoPath)) {
+      setOpenRepos((prev) => { const next = new Set(prev); next.delete(repoPath); return next; });
+    } else {
+      setOpenRepos((prev) => new Set(prev).add(repoPath));
+      if (!repoFiles[repoPath]) {
+        try {
+          const entries = await api.listDirectory(repoPath);
+          setRepoFiles((prev) => ({ ...prev, [repoPath]: entries }));
+        } catch { /* ignore */ }
+      }
+    }
+  }
+
+  async function toggleRepoSubDir(dirPath: string) {
+    if (expandedRepoDirs[dirPath]) {
+      setExpandedRepoDirs((prev) => { const next = { ...prev }; delete next[dirPath]; return next; });
+    } else {
+      try {
+        const entries = await api.listDirectory(dirPath);
+        setExpandedRepoDirs((prev) => ({ ...prev, [dirPath]: entries }));
+      } catch { /* ignore */ }
+    }
+  }
+
+  function renderRepoEntries(items: FileEntry[], depth: number) {
+    return items.map((entry) => {
+      const expanded = !!expandedRepoDirs[entry.path];
+      return (
+        <div key={entry.path}>
+          <button
+            className="flex w-full items-center gap-2 py-0.5 text-left hover:bg-white/40"
+            style={{ paddingLeft: `${depth * 16 + 24}px` }}
+            onClick={() => entry.isDirectory ? toggleRepoSubDir(entry.path) : onOpenFile(entry.path, entry.name)}
+            type="button"
+          >
+            {entry.isDirectory ? (
+              <span className="w-4 shrink-0 text-center text-gray-500">{expanded ? '\u25BE' : '\u25B8'}</span>
+            ) : (
+              <span className="w-4 shrink-0" />
+            )}
+            <ExplorerIcon>{entry.isDirectory ? <FolderIcon /> : <FileIcon />}</ExplorerIcon>
+            <span className="flex-1 truncate text-black">{entry.name}</span>
+          </button>
+          {expanded && expandedRepoDirs[entry.path] ? renderRepoEntries(expandedRepoDirs[entry.path], depth + 1) : null}
+        </div>
+      );
+    });
+  }
 
   return (
-    <div className="overflow-auto">
-      <div className="mb-2 flex items-center gap-2 px-1">
-        <span className="text-[11px] text-gray-500"><GitIcon /></span>
-        <span className="text-[12px] font-medium text-black">{gitStatus.branch}</span>
+    <div className="flex h-full flex-col overflow-hidden">
+      <div className="shrink-0 overflow-y-auto border-b border-black/5 pb-1" style={{ maxHeight: '33%' }}>
+        {gitStatus ? (
+          <>
+            <div className="mb-1 flex items-center gap-2 px-1 pt-1">
+              <span className="text-[11px] text-gray-500"><GitIcon /></span>
+              <span className="text-[12px] font-medium text-black">{gitStatus.branch}</span>
+              <span className="text-[10px] text-black/40">{gitRepoPath.split('/').pop()}</span>
+            </div>
+            {gitStatus.files.length > 0 ? (
+              <div>
+                <div className="px-1 pb-0.5 text-[10px] font-medium uppercase tracking-wider text-black/40">Changes ({gitStatus.files.length})</div>
+                {gitStatus.files.map((file) => (
+                  <div className="group flex items-center gap-2 px-1 py-0.5" key={file.path}>
+                    <span className={`shrink-0 text-[10px] font-mono font-bold ${GIT_STATUS_COLOR[file.status] ?? 'text-gray-500'}`}>{file.status}</span>
+                    <button className="min-w-0 flex-1 truncate text-left text-[12px] text-black" onClick={() => file.status === '??' ? onOpenFile(gitRepoPath + '/' + file.path, file.path.split('/').pop() ?? file.path) : onOpenDiff(file.path)} type="button">
+                      {file.path}
+                    </button>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="px-1 text-[12px] text-gray-400">Working tree clean</div>
+            )}
+            {gitStatus.commits.length > 0 ? (
+              <div className="mt-1">
+                <div className="px-1 pb-0.5 text-[10px] font-medium uppercase tracking-wider text-black/40">Recent Commits</div>
+                {gitStatus.commits.slice(0, 5).map((commit) => (
+                  <div className="flex items-center gap-2 px-1 py-0.5" key={commit.hash}>
+                    <span className="shrink-0 font-mono text-[10px] text-[var(--accent)]">{commit.hash}</span>
+                    <span className="min-w-0 flex-1 truncate text-[12px] text-black">{commit.message}</span>
+                  </div>
+                ))}
+              </div>
+            ) : null}
+          </>
+        ) : (
+          <div className="px-1 pt-1 text-[12px] text-gray-400">{gitRepoPath ? 'Loading...' : 'Select a repository below'}</div>
+        )}
       </div>
 
-      {gitStatus.files.length > 0 ? (
-        <div className="mb-3">
-          <div className="px-1 pb-1 text-[10px] font-medium uppercase tracking-wider text-black/40">Changes ({gitStatus.files.length})</div>
-          {gitStatus.files.map((file) => (
-            <div className="group flex items-center gap-2 px-1 py-0.5" key={file.path}>
-              <span className={`shrink-0 text-[10px] font-mono font-bold ${GIT_STATUS_COLOR[file.status] ?? 'text-gray-500'}`}>
-                {file.status}
-              </span>
-              <button className="min-w-0 flex-1 truncate text-left text-[12px] text-black" onClick={() => file.status === '??' ? onOpenFile(file.path) : onOpenDiff(file.path)} type="button">
-                {file.path}
+      <div className="min-h-0 flex-1 overflow-y-auto pt-1">
+        <div className="px-1 pb-1 text-[10px] font-medium uppercase tracking-wider text-black/40">Repositories</div>
+        {gitRepos.map((repo) => {
+          const isOpen = openRepos.has(repo.path);
+          const isActive = repo.path === gitRepoPath;
+          return (
+            <div key={repo.path}>
+              <button
+                className="flex w-full items-center gap-2 px-1 py-0.5 text-left hover:bg-white/40"
+                onClick={() => toggleRepo(repo.path)}
+                type="button"
+              >
+                <span className="w-4 shrink-0 text-center text-gray-500">{isOpen ? '\u25BE' : '\u25B8'}</span>
+                <ExplorerIcon><GitIcon /></ExplorerIcon>
+                <span className={`flex-1 truncate text-[12px] ${isActive ? 'font-medium text-black' : 'text-black/60'}`}>{repo.name}</span>
               </button>
-              <span className="hidden text-[10px] text-gray-400 group-hover:inline">
-                {GIT_STATUS_LABEL[file.status] ?? file.status}
-              </span>
+              {isOpen && repoFiles[repo.path] ? renderRepoEntries(repoFiles[repo.path], 1) : null}
             </div>
-          ))}
-        </div>
-      ) : (
-        <div className="mb-3 px-1 text-[12px] text-gray-400">Working tree clean</div>
-      )}
-
-      {gitStatus.commits.length > 0 ? (
-        <div>
-          <div className="px-1 pb-1 text-[10px] font-medium uppercase tracking-wider text-black/40">Recent Commits</div>
-          {gitStatus.commits.map((commit) => (
-            <div className="flex items-center gap-2 px-1 py-0.5" key={commit.hash}>
-              <span className="shrink-0 font-mono text-[10px] text-[var(--accent)]">{commit.hash}</span>
-              <span className="min-w-0 flex-1 truncate text-[12px] text-black">{commit.message}</span>
-            </div>
-          ))}
-        </div>
-      ) : null}
+          );
+        })}
+        {gitRepos.length === 0 ? <EmptyInline message="No git repositories found" /> : null}
+      </div>
     </div>
   );
 }

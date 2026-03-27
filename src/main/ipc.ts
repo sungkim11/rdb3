@@ -233,6 +233,41 @@ export function registerIpcHandlers(): void {
     return os.homedir();
   });
 
+  ipcMain.handle('find-git-repos', async (_event, dirPath: string, maxDepth = 3) => {
+    const repos: Array<{ name: string; path: string }> = [];
+    async function scan(dir: string, depth: number) {
+      if (depth > maxDepth) return;
+      try {
+        const entries = await fs.promises.readdir(dir, { withFileTypes: true });
+        const dirs: string[] = [];
+        let hasGit = false;
+        for (const e of entries) {
+          if (e.name === '.git' && e.isDirectory()) { hasGit = true; break; }
+          if (e.isDirectory() && !e.name.startsWith('.') && e.name !== 'node_modules') {
+            dirs.push(path.join(dir, e.name));
+          }
+        }
+        if (hasGit) {
+          repos.push({ name: path.basename(dir), path: dir });
+        } else {
+          await Promise.all(dirs.map((d) => scan(d, depth + 1)));
+        }
+      } catch { /* permission denied, etc */ }
+    }
+    await scan(dirPath, 0);
+    repos.sort((a, b) => a.name.localeCompare(b.name));
+    return repos;
+  });
+
+  ipcMain.handle('git-repo-root', async (_event, dirPath: string) => {
+    try {
+      const { stdout } = await execFileAsync('git', ['rev-parse', '--show-toplevel'], { cwd: dirPath });
+      return stdout.trim();
+    } catch {
+      return null;
+    }
+  });
+
   ipcMain.handle('git-status', async (_event, repoPath: string) => {
     try {
       const [branchResult, statusResult, logResult] = await Promise.all([
