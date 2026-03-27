@@ -233,28 +233,40 @@ export function registerIpcHandlers(): void {
     return os.homedir();
   });
 
-  ipcMain.handle('find-git-repos', async (_event, dirPath: string, maxDepth = 3) => {
+  ipcMain.handle('find-git-repos', async (_event, dirPath: string) => {
+    const home = os.homedir();
+    // Only scan directories that don't trigger macOS TCC permission prompts
+    const SCAN_DIRS = ['Developer', 'Projects', 'repos', 'src', 'code', 'workspace', 'git', 'work'];
     const repos: Array<{ name: string; path: string }> = [];
-    async function scan(dir: string, depth: number) {
-      if (depth > maxDepth) return;
+
+    async function scanDir(dir: string) {
       try {
         const entries = await fs.promises.readdir(dir, { withFileTypes: true });
-        const dirs: string[] = [];
-        let hasGit = false;
-        for (const e of entries) {
-          if (e.name === '.git' && e.isDirectory()) { hasGit = true; break; }
-          if (e.isDirectory() && !e.name.startsWith('.') && e.name !== 'node_modules') {
-            dirs.push(path.join(dir, e.name));
-          }
-        }
-        if (hasGit) {
+        if (entries.some((e) => e.name === '.git' && e.isDirectory())) {
           repos.push({ name: path.basename(dir), path: dir });
-        } else {
-          await Promise.all(dirs.map((d) => scan(d, depth + 1)));
+          return;
         }
-      } catch { /* permission denied, etc */ }
+        const subDirs = entries.filter((e) => e.isDirectory() && !e.name.startsWith('.') && e.name !== 'node_modules');
+        await Promise.all(subDirs.map(async (sub) => {
+          const subPath = path.join(dir, sub.name);
+          try {
+            const subEntries = await fs.promises.readdir(subPath, { withFileTypes: true });
+            if (subEntries.some((e) => e.name === '.git' && e.isDirectory())) {
+              repos.push({ name: sub.name, path: subPath });
+            }
+          } catch { /* skip */ }
+        }));
+      } catch { /* skip */ }
     }
-    await scan(dirPath, 0);
+
+    // Scan known developer directories under home
+    await Promise.all(SCAN_DIRS.map((name) => scanDir(path.join(home, name))));
+
+    // If a custom dirPath was provided and differs from home, scan it too
+    if (dirPath !== home) {
+      await scanDir(dirPath);
+    }
+
     repos.sort((a, b) => a.name.localeCompare(b.name));
     return repos;
   });
