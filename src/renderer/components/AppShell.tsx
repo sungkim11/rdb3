@@ -195,7 +195,7 @@ export function AppShell() {
   const [currentDir, setCurrentDir] = useState<string>('');
   const [expandedDirs, setExpandedDirs] = useState<Record<string, FileEntry[]>>({});
   const [gitStatus, setGitStatus] = useState<GitStatus | null>(null);
-  const [gitRepoPath, setGitRepoPath] = useState<string>('');
+  const [gitRepoPath, setGitRepoPath] = useState('');
 
   const activeEditorTab = useMemo(
     () => editorTabs.find((tab) => tab.id === activeEditorTabId) ?? editorTabs[0],
@@ -203,6 +203,11 @@ export function AppShell() {
   );
 
   const databaseTree = snapshot?.databaseTree ?? [];
+
+  const unsavedPgpass = useMemo(() => {
+    const savedKeys = new Set((snapshot?.savedConnections ?? []).map((c) => `${c.host}:${c.port}:${c.database}:${c.user}`));
+    return pgpassEntries.filter((e) => !savedKeys.has(`${e.host}:${e.port}:${e.database}:${e.user}`));
+  }, [pgpassEntries, snapshot?.savedConnections]);
 
   const destructiveTableHasDependents = useMemo(() => {
     if (!destructiveTableDialog) return false;
@@ -302,8 +307,10 @@ export function AppShell() {
     api.getHomeDir().then((home) => {
       setCurrentDir(home);
       setGitRepoPath(home);
-      api.listDirectory(home).then(setFileEntries).catch(() => {});
-      api.gitStatus(home).then(setGitStatus).catch(() => {});
+      Promise.all([
+        api.listDirectory(home).then(setFileEntries),
+        api.gitStatus(home).then(setGitStatus),
+      ]).catch(() => {});
     }).catch(() => {});
   }, []);
 
@@ -386,8 +393,19 @@ export function AppShell() {
     }
 
     void fetchStats();
-    const interval = setInterval(() => void fetchStats(), 10000);
-    return () => { cancelled = true; clearInterval(interval); };
+    let interval = setInterval(() => void fetchStats(), 10000);
+
+    function onVisibilityChange() {
+      if (document.hidden) {
+        clearInterval(interval);
+      } else {
+        void fetchStats();
+        interval = setInterval(() => void fetchStats(), 10000);
+      }
+    }
+    document.addEventListener('visibilitychange', onVisibilityChange);
+
+    return () => { cancelled = true; clearInterval(interval); document.removeEventListener('visibilitychange', onVisibilityChange); };
   }, [snapshot?.activeConnection?.id]);
 
   useEffect(() => {
@@ -574,8 +592,8 @@ export function AppShell() {
     }
   }
 
-  function openNewConnectionModal() {
-    setDraft(EMPTY_CONNECTION);
+  function openConnectionModal(draftValue: ConnectionInput) {
+    setDraft(draftValue);
     setPersistConnection(true);
     setTestStatus('idle');
     setTestError('');
@@ -584,8 +602,12 @@ export function AppShell() {
     setOpenMenu(null);
   }
 
+  function openNewConnectionModal() {
+    openConnectionModal(EMPTY_CONNECTION);
+  }
+
   function openConnectionFromPgpass(entry: PgpassEntry) {
-    setDraft({
+    openConnectionModal({
       name: `${entry.database}@${entry.host}`,
       host: entry.host,
       port: entry.port,
@@ -595,15 +617,10 @@ export function AppShell() {
       authMethod: 'pgpass',
       ssh: { ...EMPTY_SSH },
     });
-    setPersistConnection(true);
-    setTestStatus('idle');
-    setTestError('');
-    setConnectionTab('general');
-    setShowConnectionModal(true);
   }
 
   function openEditConnectionModal(connection: SafeSavedConnection) {
-    setDraft({
+    openConnectionModal({
       id: connection.id,
       name: connection.name,
       host: connection.host,
@@ -614,11 +631,6 @@ export function AppShell() {
       authMethod: connection.authMethod ?? 'password',
       ssh: connection.ssh ? { ...EMPTY_SSH, enabled: connection.ssh.enabled, host: connection.ssh.host, port: connection.ssh.port, user: connection.ssh.user, authMethod: connection.ssh.authMethod as 'password' | 'privateKey' } : { ...EMPTY_SSH },
     });
-    setPersistConnection(true);
-    setTestStatus('idle');
-    setTestError('');
-    setConnectionTab('general');
-    setShowConnectionModal(true);
   }
 
   async function handleTestConnection() {
@@ -1335,24 +1347,19 @@ export function AppShell() {
                     })}
                   </div>
                 ) : null}
-                {(() => {
-                  const savedKeys = new Set((snapshot?.savedConnections ?? []).map((c) => `${c.host}:${c.port}:${c.database}:${c.user}`));
-                  const unsaved = pgpassEntries.filter((e) => !savedKeys.has(`${e.host}:${e.port}:${e.database}:${e.user}`));
-                  if (!unsaved.length) return !snapshot?.savedConnections.length ? <EmptyInline message="No saved connections" /> : null;
-                  return (
-                    <div>
-                      <div className="px-1 pb-1 pt-2 text-[10px] font-medium uppercase tracking-wider text-black/40">.pgpass</div>
-                      {unsaved.map((entry) => (
-                        <div className="group flex items-center gap-2 px-1 py-1" key={`${entry.host}:${entry.port}:${entry.database}:${entry.user}`}>
-                          <ExplorerIcon><PgpassIcon /></ExplorerIcon>
-                          <button className="min-w-0 flex-1 truncate text-left text-black/50" onClick={() => openConnectionFromPgpass(entry)} type="button">
-                            {`${entry.database}@${entry.host}`}
-                          </button>
-                        </div>
-                      ))}
-                    </div>
-                  );
-                })()}
+                {unsavedPgpass.length > 0 ? (
+                  <div>
+                    <div className="px-1 pb-1 pt-2 text-[10px] font-medium uppercase tracking-wider text-black/40">.pgpass</div>
+                    {unsavedPgpass.map((entry) => (
+                      <div className="group flex items-center gap-2 px-1 py-1" key={`${entry.host}:${entry.port}:${entry.database}:${entry.user}`}>
+                        <ExplorerIcon><PgpassIcon /></ExplorerIcon>
+                        <button className="min-w-0 flex-1 truncate text-left text-black/50" onClick={() => openConnectionFromPgpass(entry)} type="button">
+                          {`${entry.database}@${entry.host}`}
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                ) : !snapshot?.savedConnections.length ? <EmptyInline message="No saved connections" /> : null}
               </div>
             </div>
 
@@ -2549,8 +2556,6 @@ function FileTree({ entries, currentDir, expandedDirs, onNavigate, onToggleDir, 
   onToggleDir: (path: string) => void;
   onOpenFile: (path: string, name: string) => void;
 }) {
-  const dirName = currentDir.split('/').pop() || '/';
-
   function renderEntries(items: FileEntry[], depth: number) {
     return items.map((entry) => {
       const expanded = !!expandedDirs[entry.path];
@@ -2589,21 +2594,21 @@ function FileTree({ entries, currentDir, expandedDirs, onNavigate, onToggleDir, 
   );
 }
 
+const GIT_STATUS_LABEL: Record<string, string> = {
+  M: 'Modified', A: 'Added', D: 'Deleted', R: 'Renamed', '??': 'Untracked', U: 'Unmerged',
+  MM: 'Modified', AM: 'Added', AD: 'Added',
+};
+const GIT_STATUS_COLOR: Record<string, string> = {
+  M: 'text-amber-600', A: 'text-green-600', D: 'text-red-500', '??': 'text-gray-400', U: 'text-purple-500',
+  MM: 'text-amber-600', AM: 'text-green-600', AD: 'text-green-600',
+};
+
 function GitPanel({ gitStatus, onOpenDiff, onOpenFile }: {
   gitStatus: GitStatus | null;
   onOpenDiff: (filePath: string) => void;
   onOpenFile: (filePath: string) => void;
 }) {
   if (!gitStatus) return <EmptyInline message="Not a git repository" />;
-
-  const statusLabel: Record<string, string> = {
-    M: 'Modified', A: 'Added', D: 'Deleted', R: 'Renamed', '??': 'Untracked', U: 'Unmerged',
-    MM: 'Modified', AM: 'Added', AD: 'Added',
-  };
-  const statusColor: Record<string, string> = {
-    M: 'text-amber-600', A: 'text-green-600', D: 'text-red-500', '??': 'text-gray-400', U: 'text-purple-500',
-    MM: 'text-amber-600', AM: 'text-green-600', AD: 'text-green-600',
-  };
 
   return (
     <div className="overflow-auto">
@@ -2617,14 +2622,14 @@ function GitPanel({ gitStatus, onOpenDiff, onOpenFile }: {
           <div className="px-1 pb-1 text-[10px] font-medium uppercase tracking-wider text-black/40">Changes ({gitStatus.files.length})</div>
           {gitStatus.files.map((file) => (
             <div className="group flex items-center gap-2 px-1 py-0.5" key={file.path}>
-              <span className={`shrink-0 text-[10px] font-mono font-bold ${statusColor[file.status] ?? 'text-gray-500'}`}>
+              <span className={`shrink-0 text-[10px] font-mono font-bold ${GIT_STATUS_COLOR[file.status] ?? 'text-gray-500'}`}>
                 {file.status}
               </span>
               <button className="min-w-0 flex-1 truncate text-left text-[12px] text-black" onClick={() => file.status === '??' ? onOpenFile(file.path) : onOpenDiff(file.path)} type="button">
                 {file.path}
               </button>
               <span className="hidden text-[10px] text-gray-400 group-hover:inline">
-                {statusLabel[file.status] ?? file.status}
+                {GIT_STATUS_LABEL[file.status] ?? file.status}
               </span>
             </div>
           ))}
@@ -2686,7 +2691,10 @@ function ResultsTable({
 
   const DEFAULT_COL_WIDTH = 150;
   const ROW_NUM_WIDTH = 48;
-  const totalWidth = ROW_NUM_WIDTH + result.columns.reduce((sum, _, i) => sum + (colWidths[i] ?? DEFAULT_COL_WIDTH), 0);
+  const totalWidth = useMemo(
+    () => ROW_NUM_WIDTH + result.columns.reduce((sum, _, i) => sum + (colWidths[i] ?? DEFAULT_COL_WIDTH), 0),
+    [colWidths, result.columns],
+  );
 
   return (
     <div className="bg-transparent">

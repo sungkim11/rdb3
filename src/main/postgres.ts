@@ -4,6 +4,45 @@ import { buildConnectionString } from './types';
 import { openTunnel } from './ssh-tunnel';
 import { lookupPgpass } from './pgpass';
 
+// Cache previous TPS/CPU snapshots to avoid pg_sleep blocking
+let prevTxnCount: number | null = null;
+let prevTxnTime: number | null = null;
+let prevCpuSnapshot: { idle: number; total: number } | null = null;
+
+// Connection pool cache keyed by connection id
+const pools = new Map<string, pg.Pool>();
+
+function getPool(conn: SavedConnection, host: string, port: number, password: string): pg.Pool {
+  const key = `${conn.id}:${host}:${port}`;
+  let pool = pools.get(key);
+  if (pool) return pool;
+
+  const config: pg.PoolConfig = {
+    host,
+    port,
+    user: conn.user,
+    database: conn.database,
+    connectionTimeoutMillis: 10000,
+    max: 4,
+    idleTimeoutMillis: 30000,
+  };
+  if (password) config.password = password;
+
+  pool = new pg.Pool(config);
+  pools.set(key, pool);
+  return pool;
+}
+
+export function closeAllPools(): void {
+  for (const pool of pools.values()) {
+    pool.end().catch(() => {});
+  }
+  pools.clear();
+  prevTxnCount = null;
+  prevTxnTime = null;
+  prevCpuSnapshot = null;
+}
+
 function quoteIdentifier(value: string): string {
   return `"${value.replace(/"/g, '""')}"`;
 }
@@ -36,37 +75,30 @@ function serializeValue(val: unknown): string {
   return String(val);
 }
 
-async function connect(conn: SavedConnection): Promise<pg.Client> {
+function resolveConnParams(conn: SavedConnection): { host: string; port: number; password: string } & Promise<{ host: string; port: number; password: string }> {
+  // Synchronous defaults
   let host = conn.host;
   let port = conn.port;
-
-  // If SSH tunnel is enabled, route through it
-  if (conn.ssh?.enabled) {
-    port = await openTunnel(conn.ssh, conn.host, conn.port);
-    host = '127.0.0.1';
-  }
-
-  // Resolve password: use pgpass if authMethod is 'pgpass' or if password is empty
   let password = conn.password;
   if (conn.authMethod === 'pgpass' || !password) {
     password = lookupPgpass(conn.host, conn.port, conn.database, conn.user) ?? '';
   }
 
-  const config: pg.ClientConfig = {
-    host,
-    port,
-    user: conn.user,
-    database: conn.database,
-    connectionTimeoutMillis: 10000,
-  };
-  // Only set password if we have one — omitting lets libpq/pg try env vars and pgpass
-  if (password) {
-    config.password = password;
-  }
+  const result = (async () => {
+    if (conn.ssh?.enabled) {
+      port = await openTunnel(conn.ssh, conn.host, conn.port);
+      host = '127.0.0.1';
+    }
+    return { host, port, password };
+  })();
 
-  const client = new pg.Client(config);
-  await client.connect();
-  return client;
+  return Object.assign(result, { host, port, password });
+}
+
+async function connect(conn: SavedConnection): Promise<pg.PoolClient> {
+  const { host, port, password } = await resolveConnParams(conn);
+  const pool = getPool(conn, host, port, password);
+  return pool.connect();
 }
 
 
@@ -101,45 +133,42 @@ export async function getHostStats(conn: SavedConnection): Promise<HostStats> {
       cacheHitRatio: null,
     };
 
-    // DB size
-    try {
-      const r = await client.query('SELECT pg_database_size(current_database()) AS size');
-      stats.dbSizeMb = Math.round(Number(r.rows[0].size) / 1024 / 1024);
-    } catch {}
-
-    // Active connections + saturation
+    // Combined query for core stats — single round trip instead of 5
     try {
       const r = await client.query(`
         SELECT
+          pg_database_size(current_database()) AS db_size,
           (SELECT count(*)::int FROM pg_stat_activity) AS active,
-          (SELECT setting::int FROM pg_settings WHERE name = 'max_connections') AS max_conn
+          (SELECT setting::int FROM pg_settings WHERE name = 'max_connections') AS max_conn,
+          (SELECT xact_commit + xact_rollback FROM pg_stat_database WHERE datname = current_database()) AS txn,
+          now() - pg_postmaster_start_time() AS uptime,
+          (SELECT CASE WHEN blks_hit + blks_read = 0 THEN 0
+                  ELSE round(100.0 * blks_hit / (blks_hit + blks_read), 1) END
+           FROM pg_stat_database WHERE datname = current_database()) AS cache_ratio
       `);
-      stats.activeConnections = r.rows[0].active;
-      stats.maxConnections = r.rows[0].max_conn;
+      const row = r.rows[0];
+
+      stats.dbSizeMb = Math.round(Number(row.db_size) / 1024 / 1024);
+      stats.activeConnections = row.active;
+      stats.maxConnections = row.max_conn;
       if (stats.maxConnections && stats.maxConnections > 0) {
         stats.connectionSaturationPercent = Math.round((stats.activeConnections! / stats.maxConnections) * 100);
       }
-    } catch {}
+      stats.cacheHitRatio = Number(row.cache_ratio);
 
-    // Transaction throughput (TPS) - measure over 1 second
-    try {
-      const r1 = await client.query(
-        `SELECT xact_commit + xact_rollback AS txn FROM pg_stat_database WHERE datname = current_database()`
-      );
-      await client.query('SELECT pg_sleep(1)');
-      const r2 = await client.query(
-        `SELECT xact_commit + xact_rollback AS txn FROM pg_stat_database WHERE datname = current_database()`
-      );
-      const t1 = Number(r1.rows[0].txn);
-      const t2 = Number(r2.rows[0].txn);
-      stats.tps = Math.max(0, t2 - t1);
-    } catch {}
+      // TPS: delta from previous poll — no pg_sleep needed
+      const now = Date.now();
+      const txnCount = Number(row.txn);
+      if (prevTxnCount !== null && prevTxnTime !== null) {
+        const elapsed = (now - prevTxnTime) / 1000;
+        if (elapsed > 0) {
+          stats.tps = Math.round(Math.max(0, txnCount - prevTxnCount) / elapsed);
+        }
+      }
+      prevTxnCount = txnCount;
+      prevTxnTime = now;
 
-    // Uptime
-    try {
-      const r = await client.query("SELECT now() - pg_postmaster_start_time() AS uptime");
-      const raw = String(r.rows[0].uptime);
-      // Format: "X days HH:MM:SS.xxx" -> simplify
+      const raw = String(row.uptime);
       const match = raw.match(/^(?:(\d+)\s+days?\s+)?(\d+):(\d+):/);
       if (match) {
         const days = match[1] ? `${match[1]}d ` : '';
@@ -149,17 +178,7 @@ export async function getHostStats(conn: SavedConnection): Promise<HostStats> {
       }
     } catch {}
 
-    // Cache hit ratio
-    try {
-      const r = await client.query(
-        `SELECT CASE WHEN blks_hit + blks_read = 0 THEN 0
-                ELSE round(100.0 * blks_hit / (blks_hit + blks_read), 1) END AS ratio
-         FROM pg_stat_database WHERE datname = current_database()`
-      );
-      stats.cacheHitRatio = Number(r.rows[0].ratio);
-    } catch {}
-
-    // Host memory from /proc/meminfo (Linux only, requires superuser)
+    // Host memory (Linux only, requires superuser)
     try {
       const r = await client.query("SELECT pg_read_file('/proc/meminfo') AS info");
       const info = String(r.rows[0].info);
@@ -174,33 +193,27 @@ export async function getHostStats(conn: SavedConnection): Promise<HostStats> {
       }
     } catch {}
 
-    // Host CPU from /proc/stat (Linux only, requires superuser)
-    // Take two snapshots 500ms apart to measure usage
+    // Host CPU: delta from previous poll — no pg_sleep needed
     try {
-      const r1 = await client.query("SELECT pg_read_file('/proc/stat') AS info");
-      await client.query("SELECT pg_sleep(0.5)");
-      const r2 = await client.query("SELECT pg_read_file('/proc/stat') AS info");
+      const r = await client.query("SELECT pg_read_file('/proc/stat') AS info");
+      const line = String(r.rows[0].info).split('\n')[0];
+      const parts = line.trim().split(/\s+/).slice(1).map(Number);
+      const idle = parts[3] + (parts[4] || 0);
+      const total = parts.reduce((a, b) => a + b, 0);
 
-      const parseCpu = (text: string) => {
-        const line = String(text).split('\n')[0]; // "cpu  user nice system idle ..."
-        const parts = line.trim().split(/\s+/).slice(1).map(Number);
-        const idle = parts[3] + (parts[4] || 0); // idle + iowait
-        const total = parts.reduce((a, b) => a + b, 0);
-        return { idle, total };
-      };
-
-      const s1 = parseCpu(r1.rows[0].info);
-      const s2 = parseCpu(r2.rows[0].info);
-      const idleDelta = s2.idle - s1.idle;
-      const totalDelta = s2.total - s1.total;
-      if (totalDelta > 0) {
-        stats.cpuUsagePercent = Math.round(((totalDelta - idleDelta) / totalDelta) * 100);
+      if (prevCpuSnapshot) {
+        const idleDelta = idle - prevCpuSnapshot.idle;
+        const totalDelta = total - prevCpuSnapshot.total;
+        if (totalDelta > 0) {
+          stats.cpuUsagePercent = Math.round(((totalDelta - idleDelta) / totalDelta) * 100);
+        }
       }
+      prevCpuSnapshot = { idle, total };
     } catch {}
 
     return stats;
   } finally {
-    await client.end();
+    client.release();
   }
 }
 
@@ -236,7 +249,7 @@ export async function getActiveQueries(conn: SavedConnection): Promise<ActiveQue
       durationMs: Math.round(r.duration_ms as number),
     }));
   } finally {
-    await client.end();
+    client.release();
   }
 }
 
@@ -245,7 +258,7 @@ export async function testConnection(conn: SavedConnection): Promise<void> {
   try {
     await client.query('SELECT 1');
   } finally {
-    await client.end();
+    client.release();
   }
 }
 
@@ -367,7 +380,7 @@ export async function fetchTree(conn: SavedConnection): Promise<SchemaNode[]> {
       return { name: schemaName, tables };
     });
   } finally {
-    await client.end();
+    client.release();
   }
 }
 
@@ -419,7 +432,7 @@ export async function runQuery(
       notice,
     };
   } finally {
-    await client.end();
+    client.release();
   }
 }
 
@@ -434,7 +447,7 @@ export async function dropTable(
     const sql = `DROP TABLE ${quoteIdentifier(schema)}.${quoteIdentifier(table)}${cascade ? ' CASCADE' : ''}`;
     await client.query(sql);
   } finally {
-    await client.end();
+    client.release();
   }
 }
 
@@ -449,7 +462,7 @@ export async function truncateTable(
     const sql = `TRUNCATE TABLE ${quoteIdentifier(schema)}.${quoteIdentifier(table)}${cascade ? ' CASCADE' : ''}`;
     await client.query(sql);
   } finally {
-    await client.end();
+    client.release();
   }
 }
 
@@ -474,7 +487,7 @@ export async function getPrimaryKeyColumns(
     );
     return result.rows.map((r: Record<string, unknown>) => r.attname as string);
   } finally {
-    await client.end();
+    client.release();
   }
 }
 
@@ -524,7 +537,7 @@ export async function getEditableTableData(
 
     return { columns, columnTypes, rows, primaryKeyColumns: pkCols, totalCount };
   } finally {
-    await client.end();
+    client.release();
   }
 }
 
@@ -668,7 +681,7 @@ export async function executeDml(
       throw err;
     }
   } finally {
-    await client.end();
+    client.release();
   }
 }
 
@@ -773,7 +786,7 @@ export async function getTableDdl(
 
     return ddl;
   } finally {
-    await client.end();
+    client.release();
   }
 }
 
@@ -822,7 +835,7 @@ export async function getModifyTableInfo(
       })),
     };
   } finally {
-    await client.end();
+    client.release();
   }
 }
 
@@ -900,7 +913,7 @@ export async function alterTable(
       throw err;
     }
   } finally {
-    await client.end();
+    client.release();
   }
 }
 
@@ -930,6 +943,6 @@ export async function exportTableCsv(
     fs.writeFileSync(filePath, [header, ...csvRows].join('\n'), 'utf-8');
     return rows.length;
   } finally {
-    await client.end();
+    client.release();
   }
 }

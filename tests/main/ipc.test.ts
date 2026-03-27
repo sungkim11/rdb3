@@ -17,6 +17,7 @@ vi.mock('../../src/main/postgres', () => ({
   getModifyTableInfo: vi.fn().mockResolvedValue({ schema: 'public', table: 'test', columns: [] }),
   alterTable: vi.fn().mockResolvedValue(undefined),
   exportTableCsv: vi.fn().mockResolvedValue(0),
+  closeAllPools: vi.fn(),
 }));
 
 vi.mock('../../src/main/storage', () => ({

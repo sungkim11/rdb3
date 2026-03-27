@@ -13,6 +13,7 @@ const queryResponses = new Map<string, { rows: Record<string, unknown>[]; fields
 const mockClient = {
   connect: vi.fn().mockResolvedValue(undefined),
   end: vi.fn().mockResolvedValue(undefined),
+  release: vi.fn(),
   query: vi.fn().mockImplementation((sql: string, params?: unknown[]) => {
     queries.push({ sql, params });
     for (const [pattern, result] of queryResponses) {
@@ -23,13 +24,20 @@ const mockClient = {
 };
 
 vi.mock('pg', () => ({
-  default: { Client: vi.fn().mockImplementation(function () { return mockClient; }) },
+  default: {
+    Client: vi.fn().mockImplementation(function () { return mockClient; }),
+    Pool: vi.fn().mockImplementation(function () { return { connect: vi.fn().mockResolvedValue(mockClient), end: vi.fn().mockResolvedValue(undefined) }; }),
+  },
 }));
 vi.mock('node:fs', () => ({
   default: {
     existsSync: vi.fn().mockReturnValue(false),
     readFileSync: vi.fn().mockReturnValue('[]'),
     writeFileSync: vi.fn(),
+    promises: {
+      readdir: vi.fn().mockResolvedValue([]),
+      readFile: vi.fn().mockResolvedValue(''),
+    },
   },
   existsSync: vi.fn().mockReturnValue(false),
   readFileSync: vi.fn().mockReturnValue('[]'),

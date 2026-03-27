@@ -11,6 +11,7 @@ const queries: Array<{ sql: string; params?: unknown[] }> = [];
 const mockClient = {
   connect: vi.fn().mockResolvedValue(undefined),
   end: vi.fn().mockResolvedValue(undefined),
+  release: vi.fn(),
   query: vi.fn().mockImplementation((sql: string, params?: unknown[]) => {
     queries.push({ sql, params });
     return Promise.resolve({ rows: [], fields: [], command: '', rowCount: 0 });
@@ -24,6 +25,10 @@ vi.mock('pg', () => ({
     Client: vi.fn().mockImplementation(function (config: Record<string, unknown>) {
       capturedConfig = config;
       return mockClient;
+    }),
+    Pool: vi.fn().mockImplementation(function (config: Record<string, unknown>) {
+      capturedConfig = config;
+      return { connect: vi.fn().mockResolvedValue(mockClient), end: vi.fn().mockResolvedValue(undefined) };
     }),
   },
 }));

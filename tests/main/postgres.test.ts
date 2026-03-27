@@ -7,6 +7,7 @@ const queryResponses = new Map<string, { rows: Record<string, unknown>[]; fields
 const mockClient = {
   connect: vi.fn().mockResolvedValue(undefined),
   end: vi.fn().mockResolvedValue(undefined),
+  release: vi.fn(),
   query: vi.fn().mockImplementation((sql: string, params?: unknown[]) => {
     queries.push({ sql, params });
     for (const [pattern, result] of queryResponses) {
@@ -17,7 +18,10 @@ const mockClient = {
 };
 
 vi.mock('pg', () => ({
-  default: { Client: vi.fn().mockImplementation(function () { return mockClient; }) },
+  default: {
+    Client: vi.fn().mockImplementation(function () { return mockClient; }),
+    Pool: vi.fn().mockImplementation(function () { return { connect: vi.fn().mockResolvedValue(mockClient), end: vi.fn().mockResolvedValue(undefined) }; }),
+  },
 }));
 
 import * as postgres from '../../src/main/postgres';
@@ -45,15 +49,14 @@ describe('postgres', () => {
   describe('testConnection', () => {
     it('connects, runs SELECT 1, and disconnects', async () => {
       await postgres.testConnection(conn);
-      expect(mockClient.connect).toHaveBeenCalledOnce();
       expect(queries.some((q) => q.sql === 'SELECT 1')).toBe(true);
-      expect(mockClient.end).toHaveBeenCalledOnce();
+      expect(mockClient.release).toHaveBeenCalled();
     });
 
     it('disconnects even on query failure', async () => {
       mockClient.query.mockRejectedValueOnce(new Error('connection refused'));
       await expect(postgres.testConnection(conn)).rejects.toThrow('connection refused');
-      expect(mockClient.end).toHaveBeenCalledOnce();
+      expect(mockClient.release).toHaveBeenCalled();
     });
   });
 
@@ -72,7 +75,7 @@ describe('postgres', () => {
 
     it('parses database size', async () => {
       queryResponses.set('pg_database_size', {
-        rows: [{ size: 104857600 }], // 100MB
+        rows: [{ db_size: 104857600, active: 0, max_conn: 100, txn: 0, uptime: '0:0:0', cache_ratio: 0 }],
       });
       const stats = await postgres.getHostStats(conn);
       expect(stats.dbSizeMb).toBe(100);
@@ -80,7 +83,7 @@ describe('postgres', () => {
 
     it('parses connection stats and saturation', async () => {
       queryResponses.set('pg_stat_activity', {
-        rows: [{ active: 10, max_conn: 100 }],
+        rows: [{ db_size: 0, active: 10, max_conn: 100, txn: 0, uptime: '0:0:0', cache_ratio: 0 }],
       });
       const stats = await postgres.getHostStats(conn);
       expect(stats.activeConnections).toBe(10);
@@ -90,7 +93,7 @@ describe('postgres', () => {
 
     it('always disconnects', async () => {
       await postgres.getHostStats(conn);
-      expect(mockClient.end).toHaveBeenCalled();
+      expect(mockClient.release).toHaveBeenCalled();
     });
   });
 

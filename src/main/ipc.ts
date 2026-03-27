@@ -2,6 +2,7 @@ import { ipcMain, dialog, BrowserWindow } from 'electron';
 import { appState } from './state';
 import { loadConnections, saveConnections } from './storage';
 import * as postgres from './postgres';
+import { closeAllPools } from './postgres';
 import { closeAllTunnels } from './ssh-tunnel';
 import {
   buildConnectionString,
@@ -14,6 +15,11 @@ import {
 import { parsePgpassEntries } from './pgpass';
 import fs from 'node:fs';
 import path from 'node:path';
+import os from 'node:os';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+
+const execFileAsync = promisify(execFile);
 
 function snapshot(): AppSnapshot {
   const savedConnections = loadConnections().map(toSafe);
@@ -109,6 +115,7 @@ export function registerIpcHandlers(): void {
 
   ipcMain.handle('disconnect', async () => {
     appState.activeConnection = null;
+    closeAllPools();
     closeAllTunnels();
     return snapshotWithTree();
   });
@@ -170,10 +177,6 @@ export function registerIpcHandlers(): void {
   ipcMain.handle('export-pg-dump', async (_event, schema: string, table: string, filePath: string, format: string) => {
     if (!appState.activeConnection) throw new Error('No active database connection');
     const conn = appState.activeConnection;
-    const { execFile } = await import('node:child_process');
-    const { promisify } = await import('node:util');
-    const execFileAsync = promisify(execFile);
-
     const args = [
       '-h', conn.host,
       '-p', String(conn.port),
@@ -227,36 +230,33 @@ export function registerIpcHandlers(): void {
   });
 
   ipcMain.handle('get-home-dir', () => {
-    return require('node:os').homedir();
+    return os.homedir();
   });
 
   ipcMain.handle('git-status', async (_event, repoPath: string) => {
-    const { execFile } = await import('node:child_process');
-    const { promisify } = await import('node:util');
-    const execFileAsync = promisify(execFile);
     try {
-      const { stdout: branch } = await execFileAsync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], { cwd: repoPath });
-      const { stdout: status } = await execFileAsync('git', ['status', '--porcelain', '-u'], { cwd: repoPath });
-      const { stdout: log } = await execFileAsync('git', ['log', '--oneline', '-20'], { cwd: repoPath });
-      const files = status.trim().split('\n').filter(Boolean).map((line: string) => {
-        const status = line.substring(0, 2).trim();
-        const filePath = line.substring(3);
-        return { status, path: filePath };
-      });
-      const commits = log.trim().split('\n').filter(Boolean).map((line: string) => {
+      const [branchResult, statusResult, logResult] = await Promise.all([
+        execFileAsync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], { cwd: repoPath }),
+        execFileAsync('git', ['status', '--porcelain', '-u'], { cwd: repoPath }),
+        execFileAsync('git', ['log', '--oneline', '-20'], { cwd: repoPath }),
+      ]);
+      const files = branchResult.stdout && statusResult.stdout.trim()
+        ? statusResult.stdout.trim().split('\n').filter(Boolean).map((line: string) => ({
+            status: line.substring(0, 2).trim(),
+            path: line.substring(3),
+          }))
+        : [];
+      const commits = logResult.stdout.trim().split('\n').filter(Boolean).map((line: string) => {
         const spaceIdx = line.indexOf(' ');
         return { hash: line.substring(0, spaceIdx), message: line.substring(spaceIdx + 1) };
       });
-      return { branch: branch.trim(), files, commits };
+      return { branch: branchResult.stdout.trim(), files, commits };
     } catch {
       return null;
     }
   });
 
   ipcMain.handle('git-diff', async (_event, repoPath: string, filePath: string) => {
-    const { execFile } = await import('node:child_process');
-    const { promisify } = await import('node:util');
-    const execFileAsync = promisify(execFile);
     try {
       const { stdout } = await execFileAsync('git', ['diff', 'HEAD', '--', filePath], { cwd: repoPath });
       return stdout || '(no changes)';
