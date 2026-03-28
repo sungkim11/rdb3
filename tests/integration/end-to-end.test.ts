@@ -29,20 +29,33 @@ vi.mock('pg', () => ({
     Pool: vi.fn().mockImplementation(function () { return { connect: vi.fn().mockResolvedValue(mockClient), end: vi.fn().mockResolvedValue(undefined) }; }),
   },
 }));
-vi.mock('node:fs', () => ({
-  default: {
+vi.mock('node:fs', () => {
+  const mockWriteStream = {
+    write: vi.fn().mockReturnValue(true),
+    end: vi.fn((cb?: () => void) => { if (cb) cb(); }),
+    on: vi.fn().mockReturnThis(),
+    once: vi.fn().mockReturnThis(),
+  };
+  return {
+    default: {
+      existsSync: vi.fn().mockReturnValue(false),
+      readFileSync: vi.fn().mockReturnValue('[]'),
+      writeFileSync: vi.fn(),
+      createWriteStream: vi.fn().mockReturnValue(mockWriteStream),
+      promises: {
+        readdir: vi.fn().mockResolvedValue([]),
+        readFile: vi.fn().mockResolvedValue(''),
+        writeFile: vi.fn().mockResolvedValue(undefined),
+        mkdir: vi.fn().mockResolvedValue(undefined),
+        access: vi.fn().mockResolvedValue(undefined),
+      },
+    },
     existsSync: vi.fn().mockReturnValue(false),
     readFileSync: vi.fn().mockReturnValue('[]'),
     writeFileSync: vi.fn(),
-    promises: {
-      readdir: vi.fn().mockResolvedValue([]),
-      readFile: vi.fn().mockResolvedValue(''),
-    },
-  },
-  existsSync: vi.fn().mockReturnValue(false),
-  readFileSync: vi.fn().mockReturnValue('[]'),
-  writeFileSync: vi.fn(),
-}));
+    createWriteStream: vi.fn().mockReturnValue(mockWriteStream),
+  };
+});
 
 import { ipcMain } from 'electron';
 import { registerIpcHandlers } from '../../src/main/ipc';
@@ -315,12 +328,26 @@ describe('end-to-end integration', () => {
     });
 
     it('export-table-csv queries the table and returns row count', async () => {
-      queryResponses.set('SELECT * FROM', {
-        rows: [{ id: 1, name: 'Alice' }],
-        fields: [{ name: 'id' }, { name: 'name' }],
+      let fetchCount = 0;
+      mockClient.query.mockImplementation((sql: string, params?: unknown[]) => {
+        queries.push({ sql, params });
+        if (sql.startsWith('FETCH')) {
+          fetchCount++;
+          if (fetchCount === 1) {
+            return Promise.resolve({
+              rows: [{ id: 1, name: 'Alice' }],
+              fields: [{ name: 'id' }, { name: 'name' }],
+            });
+          }
+          return Promise.resolve({ rows: [], fields: [{ name: 'id' }, { name: 'name' }] });
+        }
+        for (const [pattern, result] of queryResponses) {
+          if (sql.includes(pattern)) return Promise.resolve(result);
+        }
+        return Promise.resolve({ rows: [], fields: [], command: '', rowCount: 0 });
       });
 
-      const count = await invoke('export-table-csv', 'public', 'users', '/tmp/users.csv');
+      const count = await invoke('export-table-csv', 'public', 'users', '/tmp/postgrip-test/users.csv');
       expect(count).toBe(1);
       expect(queries.some((q) => q.sql.includes('"public"."users"'))).toBe(true);
     });

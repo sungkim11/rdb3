@@ -50,14 +50,15 @@ describe('postgres', () => {
   describe('testConnection', () => {
     it('connects, runs SELECT 1, and disconnects', async () => {
       await postgres.testConnection(conn);
+      expect(mockClient.connect).toHaveBeenCalled();
       expect(queries.some((q) => q.sql === 'SELECT 1')).toBe(true);
-      expect(mockClient.release).toHaveBeenCalled();
+      expect(mockClient.end).toHaveBeenCalled();
     });
 
     it('disconnects even on query failure', async () => {
       mockClient.query.mockRejectedValueOnce(new Error('connection refused'));
       await expect(postgres.testConnection(conn)).rejects.toThrow('connection refused');
-      expect(mockClient.release).toHaveBeenCalled();
+      expect(mockClient.end).toHaveBeenCalled();
     });
   });
 
@@ -456,12 +457,20 @@ describe('postgres', () => {
 
   describe('exportTableCsv', () => {
     it('queries the table and returns row count', async () => {
-      queryResponses.set('SELECT * FROM', {
-        rows: [
-          { id: 1, name: 'Alice' },
-          { id: 2, name: 'Bob' },
-        ],
-        fields: [{ name: 'id' }, { name: 'name' }],
+      let fetchCount = 0;
+      mockClient.query.mockImplementation((sql: string, params?: unknown[]) => {
+        queries.push({ sql, params });
+        if (sql.startsWith('FETCH')) {
+          fetchCount++;
+          if (fetchCount === 1) {
+            return Promise.resolve({
+              rows: [{ id: 1, name: 'Alice' }, { id: 2, name: 'Bob' }],
+              fields: [{ name: 'id' }, { name: 'name' }],
+            });
+          }
+          return Promise.resolve({ rows: [], fields: [{ name: 'id' }, { name: 'name' }] });
+        }
+        return Promise.resolve({ rows: [], fields: [], command: '', rowCount: 0 });
       });
 
       const count = await postgres.exportTableCsv(conn, 'public', 'users', '/tmp/out.csv');
@@ -931,12 +940,23 @@ describe('postgres', () => {
         ParquetWriter: { openFile: vi.fn().mockResolvedValue(mockWriter) },
       }));
 
-      queryResponses.set('SELECT * FROM "public"."users"', {
-        rows: [{ id: 1, name: 'Alice' }, { id: 2, name: 'Bob' }],
-        fields: [
-          { name: 'id', dataTypeID: 23 },
-          { name: 'name', dataTypeID: 25 },
-        ] as never,
+      let fetchCount = 0;
+      mockClient.query.mockImplementation((sql: string, params?: unknown[]) => {
+        queries.push({ sql, params });
+        if (sql.startsWith('FETCH')) {
+          fetchCount++;
+          if (fetchCount === 1) {
+            return Promise.resolve({
+              rows: [{ id: 1, name: 'Alice' }, { id: 2, name: 'Bob' }],
+              fields: [
+                { name: 'id', dataTypeID: 23 },
+                { name: 'name', dataTypeID: 25 },
+              ],
+            });
+          }
+          return Promise.resolve({ rows: [], fields: [] });
+        }
+        return Promise.resolve({ rows: [], fields: [], command: '', rowCount: 0 });
       });
 
       const count = await postgres.exportTableParquet(conn, 'public', 'users', '/tmp/test.parquet');

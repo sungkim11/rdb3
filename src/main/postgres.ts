@@ -1,13 +1,25 @@
 import pg from 'pg';
 import type { SavedConnection, QueryResult, SchemaNode, ColumnNode, TableNode, KeyNode, IndexNode } from './types';
 import { buildConnectionString } from './types';
-import { openTunnel } from './ssh-tunnel';
+import { openTunnel, openEphemeralTunnel } from './ssh-tunnel';
 import { lookupPgpass } from './pgpass';
 
-// Cache previous TPS/CPU snapshots to avoid pg_sleep blocking
-let prevTxnCount: number | null = null;
-let prevTxnTime: number | null = null;
-let prevCpuSnapshot: { idle: number; total: number } | null = null;
+// Per-connection monitoring snapshots to avoid cross-connection pollution (Finding #5)
+interface MonitoringSnapshot {
+  prevTxnCount: number | null;
+  prevTxnTime: number | null;
+  prevCpuSnapshot: { idle: number; total: number } | null;
+}
+const monitoringState = new Map<string, MonitoringSnapshot>();
+
+function getMonitoringState(connId: string): MonitoringSnapshot {
+  let state = monitoringState.get(connId);
+  if (!state) {
+    state = { prevTxnCount: null, prevTxnTime: null, prevCpuSnapshot: null };
+    monitoringState.set(connId, state);
+  }
+  return state;
+}
 
 // Connection pool cache keyed by connection id
 const pools = new Map<string, pg.Pool>();
@@ -23,6 +35,7 @@ function getPool(conn: SavedConnection, host: string, port: number, password: st
     user: conn.user,
     database: conn.database,
     connectionTimeoutMillis: 10000,
+    min: 1,
     max: 4,
     idleTimeoutMillis: 30000,
   };
@@ -33,14 +46,23 @@ function getPool(conn: SavedConnection, host: string, port: number, password: st
   return pool;
 }
 
+/** Close pools belonging to a specific connection (used on connection switch). */
+export function closePoolsForConnection(connId: string): void {
+  for (const [key, pool] of pools.entries()) {
+    if (key.startsWith(connId + ':')) {
+      pool.end().catch(() => {});
+      pools.delete(key);
+    }
+  }
+  monitoringState.delete(connId);
+}
+
 export function closeAllPools(): void {
   for (const pool of pools.values()) {
     pool.end().catch(() => {});
   }
   pools.clear();
-  prevTxnCount = null;
-  prevTxnTime = null;
-  prevCpuSnapshot = null;
+  monitoringState.clear();
 }
 
 function quoteIdentifier(value: string): string {
@@ -104,7 +126,7 @@ function serializeValue(val: unknown): string {
   return String(val);
 }
 
-function resolveConnParams(conn: SavedConnection): { host: string; port: number; password: string } & Promise<{ host: string; port: number; password: string }> {
+export function resolveConnParams(conn: SavedConnection): { host: string; port: number; password: string } & Promise<{ host: string; port: number; password: string }> {
   // Synchronous defaults
   let host = conn.host;
   let port = conn.port;
@@ -186,16 +208,17 @@ export async function getHostStats(conn: SavedConnection): Promise<HostStats> {
       stats.cacheHitRatio = Number(row.cache_ratio);
 
       // TPS: delta from previous poll — no pg_sleep needed
+      const monState = getMonitoringState(conn.id);
       const now = Date.now();
       const txnCount = Number(row.txn);
-      if (prevTxnCount !== null && prevTxnTime !== null) {
-        const elapsed = (now - prevTxnTime) / 1000;
+      if (monState.prevTxnCount !== null && monState.prevTxnTime !== null) {
+        const elapsed = (now - monState.prevTxnTime) / 1000;
         if (elapsed > 0) {
-          stats.tps = Math.round(Math.max(0, txnCount - prevTxnCount) / elapsed);
+          stats.tps = Math.round(Math.max(0, txnCount - monState.prevTxnCount) / elapsed);
         }
       }
-      prevTxnCount = txnCount;
-      prevTxnTime = now;
+      monState.prevTxnCount = txnCount;
+      monState.prevTxnTime = now;
 
       const raw = String(row.uptime);
       const match = raw.match(/^(?:(\d+)\s+days?\s+)?(\d+):(\d+):/);
@@ -230,14 +253,15 @@ export async function getHostStats(conn: SavedConnection): Promise<HostStats> {
       const idle = parts[3] + (parts[4] || 0);
       const total = parts.reduce((a, b) => a + b, 0);
 
-      if (prevCpuSnapshot) {
-        const idleDelta = idle - prevCpuSnapshot.idle;
-        const totalDelta = total - prevCpuSnapshot.total;
+      const monState = getMonitoringState(conn.id);
+      if (monState.prevCpuSnapshot) {
+        const idleDelta = idle - monState.prevCpuSnapshot.idle;
+        const totalDelta = total - monState.prevCpuSnapshot.total;
         if (totalDelta > 0) {
           stats.cpuUsagePercent = Math.round(((totalDelta - idleDelta) / totalDelta) * 100);
         }
       }
-      prevCpuSnapshot = { idle, total };
+      monState.prevCpuSnapshot = { idle, total };
     } catch {}
 
     return stats;
@@ -514,12 +538,43 @@ export async function executeSql(conn: SavedConnection, sql: string): Promise<vo
   }
 }
 
+/**
+ * Test a connection using a standalone client and ephemeral SSH tunnel.
+ * - Uses pg.Client (not the pool) to avoid orphaned pools on id dedup.
+ * - Uses openEphemeralTunnel (not the cached openTunnel) so the probe
+ *   never reuses or tears down a tunnel belonging to a live session.
+ */
 export async function testConnection(conn: SavedConnection): Promise<void> {
-  const client = await connect(conn);
+  let host = conn.host;
+  let port = conn.port;
+  let password = conn.password;
+  if (conn.authMethod === 'pgpass' || !password) {
+    password = lookupPgpass(conn.host, conn.port, conn.database, conn.user) ?? '';
+  }
+
+  let closeTunnel: (() => void) | undefined;
+  if (conn.ssh?.enabled) {
+    const tunnel = await openEphemeralTunnel(conn.ssh, conn.host, conn.port);
+    host = '127.0.0.1';
+    port = tunnel.localPort;
+    closeTunnel = tunnel.close;
+  }
+
+  const config: pg.PoolConfig = {
+    host,
+    port,
+    user: conn.user,
+    database: conn.database,
+    connectionTimeoutMillis: 10000,
+  };
+  if (password) config.password = password;
+  const client = new pg.Client(config);
   try {
+    await client.connect();
     await client.query('SELECT 1');
   } finally {
-    client.release();
+    await client.end();
+    closeTunnel?.();
   }
 }
 
@@ -571,23 +626,48 @@ export async function fetchTree(conn: SavedConnection): Promise<SchemaNode[]> {
       tableMap.get(key)!.columns.push(col);
     }
 
-    // Fetch keys (primary, unique, foreign)
-    const { rows: keyRows } = await client.query(
-      `SELECT
-         tc.table_schema, tc.table_name, tc.constraint_name, tc.constraint_type,
-         array_agg(kcu.column_name ORDER BY kcu.ordinal_position) AS columns,
-         ccu.table_schema || '.' || ccu.table_name AS referenced_table
-       FROM information_schema.table_constraints tc
-       JOIN information_schema.key_column_usage kcu
-         ON kcu.constraint_name = tc.constraint_name AND kcu.table_schema = tc.table_schema
-       LEFT JOIN information_schema.constraint_column_usage ccu
-         ON ccu.constraint_name = tc.constraint_name AND ccu.table_schema = tc.table_schema
-         AND tc.constraint_type = 'FOREIGN KEY'
-       WHERE tc.table_schema NOT IN ('pg_catalog', 'information_schema')
-         AND tc.constraint_type IN ('PRIMARY KEY', 'UNIQUE', 'FOREIGN KEY')
-       GROUP BY tc.table_schema, tc.table_name, tc.constraint_name, tc.constraint_type, ccu.table_schema, ccu.table_name
-       ORDER BY tc.table_schema, tc.table_name, tc.constraint_type`
-    );
+    // Fetch keys, indexes, and empty schemas in parallel (all independent)
+    const [{ rows: keyRows }, { rows: indexRows }, { rows: allSchemas }] = await Promise.all([
+      client.query(
+        `SELECT
+           tc.table_schema, tc.table_name, tc.constraint_name, tc.constraint_type,
+           array_agg(kcu.column_name ORDER BY kcu.ordinal_position) AS columns,
+           ccu.table_schema || '.' || ccu.table_name AS referenced_table
+         FROM information_schema.table_constraints tc
+         JOIN information_schema.key_column_usage kcu
+           ON kcu.constraint_name = tc.constraint_name AND kcu.table_schema = tc.table_schema
+         LEFT JOIN information_schema.constraint_column_usage ccu
+           ON ccu.constraint_name = tc.constraint_name AND ccu.table_schema = tc.table_schema
+           AND tc.constraint_type = 'FOREIGN KEY'
+         WHERE tc.table_schema NOT IN ('pg_catalog', 'information_schema')
+           AND tc.constraint_type IN ('PRIMARY KEY', 'UNIQUE', 'FOREIGN KEY')
+         GROUP BY tc.table_schema, tc.table_name, tc.constraint_name, tc.constraint_type, ccu.table_schema, ccu.table_name
+         ORDER BY tc.table_schema, tc.table_name, tc.constraint_type`
+      ),
+      client.query(
+        `SELECT
+           n.nspname AS table_schema,
+           t.relname AS table_name,
+           i.relname AS index_name,
+           ix.indisunique AS is_unique,
+           array_agg(a.attname ORDER BY x.n) AS columns
+         FROM pg_index ix
+         JOIN pg_class t ON t.oid = ix.indrelid
+         JOIN pg_class i ON i.oid = ix.indexrelid
+         JOIN pg_namespace n ON n.oid = t.relnamespace
+         JOIN LATERAL unnest(ix.indkey) WITH ORDINALITY AS x(attnum, n) ON true
+         JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = x.attnum
+         WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
+           AND NOT ix.indisprimary
+         GROUP BY n.nspname, t.relname, i.relname, ix.indisunique
+         ORDER BY n.nspname, t.relname, i.relname`
+      ),
+      client.query(
+        `SELECT schema_name FROM information_schema.schemata
+         WHERE schema_name NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
+         ORDER BY schema_name`
+      ),
+    ]);
 
     for (const row of keyRows) {
       const key = `${row.table_schema}.${row.table_name}`;
@@ -603,26 +683,6 @@ export async function fetchTree(conn: SavedConnection): Promise<SchemaNode[]> {
       }
     }
 
-    // Fetch indexes
-    const { rows: indexRows } = await client.query(
-      `SELECT
-         n.nspname AS table_schema,
-         t.relname AS table_name,
-         i.relname AS index_name,
-         ix.indisunique AS is_unique,
-         array_agg(a.attname ORDER BY x.n) AS columns
-       FROM pg_index ix
-       JOIN pg_class t ON t.oid = ix.indrelid
-       JOIN pg_class i ON i.oid = ix.indexrelid
-       JOIN pg_namespace n ON n.oid = t.relnamespace
-       JOIN LATERAL unnest(ix.indkey) WITH ORDINALITY AS x(attnum, n) ON true
-       JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = x.attnum
-       WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
-         AND NOT ix.indisprimary
-       GROUP BY n.nspname, t.relname, i.relname, ix.indisunique
-       ORDER BY n.nspname, t.relname, i.relname`
-    );
-
     for (const row of indexRows) {
       const key = `${row.table_schema}.${row.table_name}`;
       const table = tableMap.get(key);
@@ -636,12 +696,6 @@ export async function fetchTree(conn: SavedConnection): Promise<SchemaNode[]> {
       }
     }
 
-    // Include empty schemas that have no tables
-    const { rows: allSchemas } = await client.query(
-      `SELECT schema_name FROM information_schema.schemata
-       WHERE schema_name NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
-       ORDER BY schema_name`
-    );
     for (const row of allSchemas) {
       const name: string = row.schema_name;
       if (!schemaMap.has(name)) {
@@ -778,30 +832,44 @@ export async function getEditableTableData(
 ): Promise<{ columns: string[]; columnTypes: string[]; rows: (string | null)[][]; primaryKeyColumns: string[]; totalCount: number }> {
   const client = await connect(conn);
   try {
-    const pkCols = await getPrimaryKeyColumns(conn, schema, table);
     const qt = `${quoteIdentifier(schema)}.${quoteIdentifier(table)}`;
 
-    const countRes = await client.query(`SELECT count(*)::int AS cnt FROM ${qt}`);
+    // Run all 4 queries in parallel — they are independent
+    const [countRes, dataRes, typeRes, pkRes] = await Promise.all([
+      client.query(`SELECT count(*)::int AS cnt FROM ${qt}`),
+      client.query(`SELECT * FROM ${qt} LIMIT $1 OFFSET $2`, [limit, offset]),
+      client.query(
+        `SELECT a.attname, format_type(a.atttypid, a.atttypmod) AS data_type
+         FROM pg_attribute a
+         JOIN pg_class c ON c.oid = a.attrelid
+         JOIN pg_namespace n ON n.oid = c.relnamespace
+         WHERE n.nspname = $1 AND c.relname = $2 AND a.attnum > 0 AND NOT a.attisdropped
+         ORDER BY a.attnum`,
+        [schema, table],
+      ),
+      client.query(
+        `SELECT a.attname
+         FROM pg_index i
+         JOIN pg_attribute a ON a.attrelid = i.indrelid
+         JOIN LATERAL unnest(i.indkey) WITH ORDINALITY AS x(attnum, n)
+           ON a.attnum = x.attnum
+         JOIN pg_class c ON c.oid = i.indrelid
+         JOIN pg_namespace ns ON ns.oid = c.relnamespace
+         WHERE ns.nspname = $1 AND c.relname = $2 AND i.indisprimary
+         ORDER BY x.n`,
+        [schema, table],
+      ),
+    ]);
+
     const totalCount: number = countRes.rows[0].cnt;
-
-    const dataRes = await client.query(`SELECT * FROM ${qt} LIMIT $1 OFFSET $2`, [limit, offset]);
+    const pkCols = pkRes.rows.map((r: Record<string, unknown>) => r.attname as string);
     const columns = dataRes.fields?.map((f) => f.name) ?? [];
-    const columnTypes: string[] = [];
 
-    // Fetch column types
-    const typeRes = await client.query(
-      `SELECT a.attname, format_type(a.atttypid, a.atttypmod) AS data_type
-       FROM pg_attribute a
-       JOIN pg_class c ON c.oid = a.attrelid
-       JOIN pg_namespace n ON n.oid = c.relnamespace
-       WHERE n.nspname = $1 AND c.relname = $2 AND a.attnum > 0 AND NOT a.attisdropped
-       ORDER BY a.attnum`,
-      [schema, table],
-    );
     const typeMap = new Map<string, string>();
     for (const r of typeRes.rows) {
       typeMap.set(r.attname as string, r.data_type as string);
     }
+    const columnTypes: string[] = [];
     for (const col of columns) {
       columnTypes.push(typeMap.get(col) ?? 'text');
     }
@@ -1203,9 +1271,16 @@ export async function exportTableParquet(
 ): Promise<number> {
   const client = await connect(conn);
   try {
+    const cursorName = 'export_parquet_cursor';
+    const batchSize = 5000;
     const sqlText = `SELECT * FROM ${quoteIdentifier(schema)}.${quoteIdentifier(table)}`;
-    const result = await client.query(sqlText);
-    const columns = result.fields ?? [];
+
+    await client.query('BEGIN');
+    await client.query(`DECLARE ${cursorName} CURSOR FOR ${sqlText}`);
+
+    // Fetch the first batch to get column metadata
+    const firstBatch = await client.query(`FETCH ${batchSize} FROM ${cursorName}`);
+    const columns = firstBatch.fields ?? [];
 
     // Map PG OIDs to Parquet types
     const pgToParquet: Record<number, string> = {
@@ -1227,21 +1302,43 @@ export async function exportTableParquet(
     const parquetSchema = new ParquetSchema(schemaDef);
     const writer = await ParquetWriter.openFile(parquetSchema, filePath);
 
-    for (const row of result.rows ?? []) {
-      const record: Record<string, unknown> = {};
-      for (const col of columns) {
-        const val = row[col.name];
-        if (val == null) continue;
-        const pType = pgToParquet[col.dataTypeID];
-        if (pType === 'BOOLEAN') record[col.name] = Boolean(val);
-        else if (pType === 'INT32' || pType === 'INT64') record[col.name] = Number(val);
-        else if (pType === 'FLOAT' || pType === 'DOUBLE') record[col.name] = Number(val);
-        else record[col.name] = String(val);
+    let totalRows = 0;
+
+    async function writeRows(rows: Record<string, unknown>[]) {
+      for (const row of rows) {
+        const record: Record<string, unknown> = {};
+        for (const col of columns) {
+          const val = row[col.name];
+          if (val == null) continue;
+          const pType = pgToParquet[col.dataTypeID];
+          if (pType === 'BOOLEAN') record[col.name] = Boolean(val);
+          else if (pType === 'INT32' || pType === 'INT64') record[col.name] = Number(val);
+          else if (pType === 'FLOAT' || pType === 'DOUBLE') record[col.name] = Number(val);
+          else record[col.name] = String(val);
+        }
+        await writer.appendRow(record);
       }
-      await writer.appendRow(record);
     }
+
+    // Write first batch
+    await writeRows(firstBatch.rows ?? []);
+    totalRows += (firstBatch.rows ?? []).length;
+
+    // Fetch remaining batches
+    while ((firstBatch.rows ?? []).length > 0) {
+      const batch = await client.query(`FETCH ${batchSize} FROM ${cursorName}`);
+      if (!batch.rows?.length) break;
+      await writeRows(batch.rows);
+      totalRows += batch.rows.length;
+    }
+
     await writer.close();
-    return (result.rows ?? []).length;
+    await client.query('CLOSE ' + cursorName);
+    await client.query('COMMIT');
+    return totalRows;
+  } catch (err) {
+    try { await client.query('ROLLBACK'); } catch { /* ignore */ }
+    throw err;
   } finally {
     client.release();
   }
@@ -1255,23 +1352,69 @@ export async function exportTableCsv(
 ): Promise<number> {
   const client = await connect(conn);
   try {
+    const cursorName = 'export_csv_cursor';
+    const batchSize = 5000;
     const sqlText = `SELECT * FROM ${quoteIdentifier(schema)}.${quoteIdentifier(table)}`;
-    const result = await client.query(sqlText);
-    const columns = result.fields?.map((f) => f.name) ?? [];
-    const rows: string[][] = (result.rows ?? []).map((row: Record<string, unknown>) =>
-      columns.map((col) => {
-        const val = row[col];
-        return val == null ? '' : serializeValue(val);
-      }),
-    );
 
-    const fs = await import('node:fs');
-    const header = columns.map((c) => `"${c.replace(/"/g, '""')}"`).join(',');
-    const csvRows = rows.map((r) =>
-      r.map((cell) => `"${cell.replace(/"/g, '""')}"`).join(','),
-    );
-    fs.writeFileSync(filePath, [header, ...csvRows].join('\n'), 'utf-8');
-    return rows.length;
+    await client.query('BEGIN');
+    await client.query(`DECLARE ${cursorName} CURSOR FOR ${sqlText}`);
+
+    const fsNode = await import('node:fs');
+    const writeStream = fsNode.createWriteStream(filePath, { encoding: 'utf-8' });
+
+    /** Write a chunk and wait for drain if the buffer is full. */
+    function writeWithBackpressure(chunk: string): Promise<void> {
+      return new Promise((resolve, reject) => {
+        const canContinue = writeStream.write(chunk);
+        if (canContinue) {
+          resolve();
+        } else {
+          writeStream.once('drain', resolve);
+          writeStream.once('error', reject);
+        }
+      });
+    }
+
+    let totalRows = 0;
+    let headerWritten = false;
+    let columnNames: string[] = [];
+
+    // Fetch and write in batches
+    while (true) {
+      const batch = await client.query(`FETCH ${batchSize} FROM ${cursorName}`);
+      if (!headerWritten) {
+        columnNames = batch.fields?.map((f) => f.name) ?? [];
+        const header = columnNames.map((c) => `"${c.replace(/"/g, '""')}"`).join(',');
+        await writeWithBackpressure(header + '\n');
+        headerWritten = true;
+      }
+      if (!batch.rows?.length) break;
+
+      // Build the entire batch into one string to reduce write() calls
+      const lines: string[] = [];
+      for (const row of batch.rows as Record<string, unknown>[]) {
+        const csvRow = columnNames.map((col) => {
+          const val = row[col];
+          const cell = val == null ? '' : serializeValue(val);
+          return `"${cell.replace(/"/g, '""')}"`;
+        }).join(',');
+        lines.push(csvRow);
+      }
+      await writeWithBackpressure(lines.join('\n') + '\n');
+      totalRows += batch.rows.length;
+    }
+
+    await new Promise<void>((resolve, reject) => {
+      writeStream.end(() => resolve());
+      writeStream.once('error', reject);
+    });
+
+    await client.query('CLOSE ' + cursorName);
+    await client.query('COMMIT');
+    return totalRows;
+  } catch (err) {
+    try { await client.query('ROLLBACK'); } catch { /* ignore */ }
+    throw err;
   } finally {
     client.release();
   }

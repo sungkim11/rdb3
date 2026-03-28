@@ -15,51 +15,45 @@ function tunnelKey(ssh: SshConfig, dbHost: string, dbPort: number): string {
   return `${ssh.host}:${ssh.port}:${ssh.user}@${dbHost}:${dbPort}`;
 }
 
+/** Build the ssh2 connection config from an SshConfig. */
+function buildSshConnConfig(ssh: SshConfig): Record<string, unknown> {
+  const connConfig: Record<string, unknown> = {
+    host: ssh.host,
+    port: ssh.port,
+    username: ssh.user,
+    readyTimeout: 10000,
+  };
+
+  if (ssh.authMethod === 'privateKey') {
+    connConfig.privateKey = fs.readFileSync(ssh.privateKey, 'utf-8');
+    if (ssh.passphrase) {
+      connConfig.passphrase = ssh.passphrase;
+    }
+  } else {
+    connConfig.password = ssh.password;
+  }
+
+  return connConfig;
+}
+
 /**
- * Create an SSH tunnel that forwards a random local port to dbHost:dbPort
- * through the SSH server. Returns the local port to connect pg to.
+ * Core tunnel creation. Opens an SSH tunnel forwarding a random local port
+ * to dbHost:dbPort. Returns the local port, server, and sshClient.
  */
-export async function openTunnel(
+function createTunnel(
   ssh: SshConfig,
   dbHost: string,
   dbPort: number,
-): Promise<number> {
-  const key = tunnelKey(ssh, dbHost, dbPort);
-
-  // Reuse existing tunnel if still alive
-  const existing = activeTunnels.get(key);
-  if (existing) {
-    try {
-      // Quick liveness check
-      if (existing.server.listening) return existing.localPort;
-    } catch {
-      // stale, clean up below
-    }
-    closeTunnel(key);
-  }
-
-  return new Promise<number>((resolve, reject) => {
+): Promise<{ localPort: number; server: net.Server; sshClient: SshClient }> {
+  return new Promise((resolve, reject) => {
     const sshClient = new SshClient();
 
-    const connConfig: Record<string, unknown> = {
-      host: ssh.host,
-      port: ssh.port,
-      username: ssh.user,
-      readyTimeout: 10000,
-    };
-
-    if (ssh.authMethod === 'privateKey') {
-      try {
-        connConfig.privateKey = fs.readFileSync(ssh.privateKey, 'utf-8');
-      } catch (err) {
-        reject(new Error(`Cannot read SSH private key: ${(err as Error).message}`));
-        return;
-      }
-      if (ssh.passphrase) {
-        connConfig.passphrase = ssh.passphrase;
-      }
-    } else {
-      connConfig.password = ssh.password;
+    let connConfig: Record<string, unknown>;
+    try {
+      connConfig = buildSshConnConfig(ssh);
+    } catch (err) {
+      reject(new Error(`Cannot read SSH private key: ${(err as Error).message}`));
+      return;
     }
 
     sshClient.on('error', (err) => {
@@ -67,7 +61,6 @@ export async function openTunnel(
     });
 
     sshClient.on('ready', () => {
-      // Create a local TCP server that forwards to the remote DB
       const server = net.createServer((localSocket) => {
         sshClient.forwardOut(
           '127.0.0.1',
@@ -92,9 +85,7 @@ export async function openTunnel(
           reject(new Error('Failed to bind local tunnel port'));
           return;
         }
-        const localPort = addr.port;
-        activeTunnels.set(key, { sshClient, server, localPort });
-        resolve(localPort);
+        resolve({ localPort: addr.port, server, sshClient });
       });
 
       server.on('error', (err) => {
@@ -106,12 +97,76 @@ export async function openTunnel(
   });
 }
 
+/**
+ * Create an SSH tunnel that forwards a random local port to dbHost:dbPort
+ * through the SSH server. Returns the local port to connect pg to.
+ * The tunnel is cached and reused for subsequent calls with the same key.
+ */
+export async function openTunnel(
+  ssh: SshConfig,
+  dbHost: string,
+  dbPort: number,
+): Promise<number> {
+  const key = tunnelKey(ssh, dbHost, dbPort);
+
+  // Reuse existing tunnel if still alive
+  const existing = activeTunnels.get(key);
+  if (existing) {
+    try {
+      // Quick liveness check
+      if (existing.server.listening) return existing.localPort;
+    } catch {
+      // stale, clean up below
+    }
+    closeTunnel(key);
+  }
+
+  const { localPort, server, sshClient } = await createTunnel(ssh, dbHost, dbPort);
+  activeTunnels.set(key, { sshClient, server, localPort });
+  return localPort;
+}
+
+/**
+ * Open an ephemeral SSH tunnel that is NOT cached. Returns the local port
+ * and a close function. Used by testConnection to avoid interfering with
+ * tunnels used by live sessions.
+ */
+export async function openEphemeralTunnel(
+  ssh: SshConfig,
+  dbHost: string,
+  dbPort: number,
+): Promise<{ localPort: number; close: () => void }> {
+  const { localPort, server, sshClient } = await createTunnel(ssh, dbHost, dbPort);
+  return {
+    localPort,
+    close() {
+      try { server.close(); } catch {}
+      try { sshClient.end(); } catch {}
+    },
+  };
+}
+
 function closeTunnel(key: string): void {
   const tunnel = activeTunnels.get(key);
   if (!tunnel) return;
   activeTunnels.delete(key);
   try { tunnel.server.close(); } catch {}
   try { tunnel.sshClient.end(); } catch {}
+}
+
+/** Close the specific tunnel for a given SSH config + DB endpoint. */
+export function closeTunnelFor(ssh: SshConfig, dbHost: string, dbPort: number): void {
+  const key = tunnelKey(ssh, dbHost, dbPort);
+  closeTunnel(key);
+}
+
+/** Close tunnels that were opened for a specific SSH config (used on connection switch). */
+export function closeTunnelsForSsh(sshHost: string, sshPort: number, sshUser: string): void {
+  for (const key of activeTunnels.keys()) {
+    if (key.startsWith(`${sshHost}:${sshPort}:${sshUser}@`)) {
+      closeTunnel(key);
+    }
+  }
 }
 
 /** Close all active tunnels (called on disconnect / app quit). */

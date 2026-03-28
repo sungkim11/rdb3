@@ -2,8 +2,8 @@ import { app, ipcMain, dialog, BrowserWindow } from 'electron';
 import { appState } from './state';
 import { loadConnections, saveConnections, saveLastConnectionId, loadLastConnectionId } from './storage';
 import * as postgres from './postgres';
-import { closeAllPools } from './postgres';
-import { closeAllTunnels } from './ssh-tunnel';
+import { closeAllPools, closePoolsForConnection, resolveConnParams } from './postgres';
+import { closeAllTunnels, closeTunnelsForSsh } from './ssh-tunnel';
 import {
   buildConnectionString,
   toSavedConnection,
@@ -22,8 +22,46 @@ import { randomUUID } from 'node:crypto';
 
 const execFileAsync = promisify(execFile);
 
+// --- Path validation helpers (Finding #1) ---
+
+/** Directories the renderer is allowed to access for file operations. */
+function getAllowedRoots(): string[] {
+  return [
+    app.getPath('userData'),
+    os.homedir(),
+  ];
+}
+
+/**
+ * Validate that a file path resolves to somewhere under an allowed root.
+ * Prevents directory-traversal attacks from the renderer.
+ */
+function assertAllowedPath(filePath: string): void {
+  const resolved = path.resolve(filePath);
+  const roots = getAllowedRoots();
+  if (!roots.some((root) => resolved.startsWith(root + path.sep) || resolved === root)) {
+    throw new Error(`Access denied: path is outside allowed directories`);
+  }
+}
+
+/** Stricter check: path must be inside the backup directory specifically. */
+async function assertBackupPath(filePath: string): Promise<void> {
+  const resolved = path.resolve(filePath);
+  const prefPath = path.join(app.getPath('userData'), 'backup_dir.txt');
+  let backupDir: string;
+  try {
+    backupDir = (await fs.promises.readFile(prefPath, 'utf-8')).trim();
+  } catch {
+    backupDir = path.join(os.homedir(), 'PostGrip_Backups');
+  }
+  const resolvedBackupDir = path.resolve(backupDir);
+  if (!resolved.startsWith(resolvedBackupDir + path.sep) && resolved !== resolvedBackupDir) {
+    throw new Error(`Access denied: path is outside the backup directory`);
+  }
+}
+
 const pgToolCache = new Map<string, string>();
-function findPgTool(name: string): string {
+async function findPgTool(name: string): Promise<string> {
   const cached = pgToolCache.get(name);
   if (cached) return cached;
   const candidates = [
@@ -38,7 +76,7 @@ function findPgTool(name: string): string {
   ];
   for (const c of candidates) {
     try {
-      fs.accessSync(c, fs.constants.X_OK);
+      await fs.promises.access(c, fs.constants.X_OK);
       pgToolCache.set(name, c);
       return c;
     } catch { /* try next */ }
@@ -46,8 +84,18 @@ function findPgTool(name: string): string {
   return name;
 }
 
-function snapshot(): AppSnapshot {
-  const savedConnections = loadConnections().map(toSafe);
+/** Clean up pools and tunnels for the previous active connection before switching (Finding #5). */
+function cleanupPriorConnection(): void {
+  const prev = appState.activeConnection;
+  if (!prev) return;
+  closePoolsForConnection(prev.id);
+  if (prev.ssh?.enabled) {
+    closeTunnelsForSsh(prev.ssh.host, prev.ssh.port, prev.ssh.user);
+  }
+}
+
+async function snapshot(): Promise<AppSnapshot> {
+  const savedConnections = (await loadConnections()).map(toSafe);
   const activeConnection = appState.activeConnection
     ? toSummary(appState.activeConnection)
     : null;
@@ -60,7 +108,7 @@ function snapshot(): AppSnapshot {
 }
 
 async function snapshotWithTree(): Promise<AppSnapshot> {
-  const snap = snapshot();
+  const snap = await snapshot();
   if (appState.activeConnection) {
     snap.databaseTree = await postgres.fetchTree(appState.activeConnection);
   }
@@ -71,10 +119,10 @@ export function registerIpcHandlers(): void {
   ipcMain.handle('bootstrap', async () => {
     // Auto-connect to last used database on startup
     if (!appState.activeConnection) {
-      const lastId = loadLastConnectionId();
+      const lastId = await loadLastConnectionId();
       console.log('[bootstrap] last connection id:', lastId);
       if (lastId) {
-        const saved = loadConnections();
+        const saved = await loadConnections();
         const conn = saved.find((c) => c.id === lastId);
         console.log('[bootstrap] found connection:', conn ? `${conn.database}@${conn.host}` : 'not found');
         if (conn) {
@@ -120,8 +168,10 @@ export function registerIpcHandlers(): void {
     const saved = toSavedConnection(connection);
     await postgres.testConnection(saved);
 
+    cleanupPriorConnection();
+
     if (save) {
-      const existing = loadConnections();
+      const existing = await loadConnections();
       const idx = existing.findIndex((c) =>
         c.id === saved.id ||
         (c.host === saved.host && c.port === saved.port && c.database === saved.database && c.user === saved.user)
@@ -132,28 +182,29 @@ export function registerIpcHandlers(): void {
       } else {
         existing.push(saved);
       }
-      saveConnections(existing);
+      await saveConnections(existing);
     }
 
     appState.activeConnection = saved;
-    saveLastConnectionId(saved.id);
+    await saveLastConnectionId(saved.id);
     return snapshotWithTree();
   });
 
   ipcMain.handle('activate-saved-connection', async (_event, id: string) => {
-    const saved = loadConnections();
+    const saved = await loadConnections();
     const conn = saved.find((c) => c.id === id);
     if (!conn) throw new Error('Saved connection not found');
 
     await postgres.testConnection(conn);
+    cleanupPriorConnection();
     appState.activeConnection = conn;
-    saveLastConnectionId(conn.id);
+    await saveLastConnectionId(conn.id);
     return snapshotWithTree();
   });
 
   ipcMain.handle('delete-saved-connection', async (_event, id: string) => {
-    const saved = loadConnections().filter((c) => c.id !== id);
-    saveConnections(saved);
+    const saved = (await loadConnections()).filter((c) => c.id !== id);
+    await saveConnections(saved);
 
     if (appState.activeConnection?.id === id) {
       appState.activeConnection = null;
@@ -218,14 +269,16 @@ export function registerIpcHandlers(): void {
     return snapshotWithTree();
   });
 
-  ipcMain.handle('export-table-csv', async (_event, schema: string, table: string, path: string) => {
+  ipcMain.handle('export-table-csv', async (_event, schema: string, table: string, filePath: string) => {
     if (!appState.activeConnection) throw new Error('No active database connection');
-    return postgres.exportTableCsv(appState.activeConnection, schema, table, path);
+    assertAllowedPath(filePath);
+    return postgres.exportTableCsv(appState.activeConnection, schema, table, filePath);
   });
 
-  ipcMain.handle('export-table-parquet', async (_event, schema: string, table: string, path: string) => {
+  ipcMain.handle('export-table-parquet', async (_event, schema: string, table: string, filePath: string) => {
     if (!appState.activeConnection) throw new Error('No active database connection');
-    return postgres.exportTableParquet(appState.activeConnection, schema, table, path);
+    assertAllowedPath(filePath);
+    return postgres.exportTableParquet(appState.activeConnection, schema, table, filePath);
   });
 
   ipcMain.handle('create-schema', async (_event, schemaName: string) => {
@@ -242,10 +295,12 @@ export function registerIpcHandlers(): void {
 
   ipcMain.handle('export-pg-dump', async (_event, schema: string, table: string, filePath: string, format: string) => {
     if (!appState.activeConnection) throw new Error('No active database connection');
+    assertAllowedPath(filePath);
     const conn = appState.activeConnection;
+    const { host, port, password } = await resolveConnParams(conn);
     const args = [
-      '-h', conn.host,
-      '-p', String(conn.port),
+      '-h', host,
+      '-p', String(port),
       '-U', conn.user,
       '-d', conn.database,
       '-t', `"${schema.replace(/"/g, '""')}"."${table.replace(/"/g, '""')}"`,
@@ -259,11 +314,12 @@ export function registerIpcHandlers(): void {
       args.push('-Ft');
     }
 
-    const env = { ...process.env, PGPASSWORD: conn.password };
-    await execFileAsync(findPgTool('pg_dump'), args, { env, timeout: 120000 });
+    const env = { ...process.env, PGPASSWORD: password };
+    await execFileAsync(await findPgTool('pg_dump'), args, { env, timeout: 120000 });
   });
 
   ipcMain.handle('list-backups', async (_event, dirPath: string) => {
+    assertAllowedPath(dirPath);
     try {
       const entries = await fs.promises.readdir(dirPath, { withFileTypes: true });
       const backupFiles = entries.filter((e) => e.isFile() && /\.(sql|dump|tar)$/i.test(e.name));
@@ -284,62 +340,68 @@ export function registerIpcHandlers(): void {
     }
   });
 
-  ipcMain.handle('get-backup-dir', () => {
+  ipcMain.handle('get-backup-dir', async () => {
     const prefPath = path.join(app.getPath('userData'), 'backup_dir.txt');
     let backupDir: string;
     try {
-      backupDir = fs.readFileSync(prefPath, 'utf-8').trim();
+      backupDir = (await fs.promises.readFile(prefPath, 'utf-8')).trim();
     } catch {
       backupDir = path.join(os.homedir(), 'PostGrip_Backups');
     }
-    try { fs.mkdirSync(backupDir, { recursive: true }); } catch { /* ignore */ }
+    try { await fs.promises.mkdir(backupDir, { recursive: true }); } catch { /* ignore */ }
     return backupDir;
   });
 
   // --- Backup Schedules ---
   const schedulesPath = path.join(app.getPath('userData'), 'backup_schedules.json');
 
-  function loadSchedules(): Array<Record<string, unknown>> {
-    try { return JSON.parse(fs.readFileSync(schedulesPath, 'utf-8')); } catch { return []; }
+  async function loadSchedules(): Promise<Array<Record<string, unknown>>> {
+    try { return JSON.parse(await fs.promises.readFile(schedulesPath, 'utf-8')); } catch { return []; }
   }
-  function saveSchedules(schedules: Array<Record<string, unknown>>) {
-    fs.writeFileSync(schedulesPath, JSON.stringify(schedules, null, 2));
+  async function saveSchedules(schedules: Array<Record<string, unknown>>): Promise<void> {
+    await fs.promises.writeFile(schedulesPath, JSON.stringify(schedules, null, 2));
   }
 
   ipcMain.handle('list-backup-schedules', () => loadSchedules());
 
-  ipcMain.handle('add-backup-schedule', (_event, schedule: Record<string, unknown>) => {
-    const schedules = loadSchedules();
+  ipcMain.handle('add-backup-schedule', async (_event, schedule: Record<string, unknown>) => {
+    if (typeof schedule.outputDir === 'string' && schedule.outputDir) {
+      assertAllowedPath(schedule.outputDir);
+    }
+    const schedules = await loadSchedules();
     schedule.id = randomUUID();
     schedule.createdAt = new Date().toISOString();
     schedules.push(schedule);
-    saveSchedules(schedules);
+    await saveSchedules(schedules);
     return schedule;
   });
 
-  ipcMain.handle('update-backup-schedule', (_event, id: string, updates: Record<string, unknown>) => {
-    const schedules = loadSchedules();
+  ipcMain.handle('update-backup-schedule', async (_event, id: string, updates: Record<string, unknown>) => {
+    if (typeof updates.outputDir === 'string' && updates.outputDir) {
+      assertAllowedPath(updates.outputDir);
+    }
+    const schedules = await loadSchedules();
     const idx = schedules.findIndex((s) => s.id === id);
     if (idx >= 0) {
       for (const [key, value] of Object.entries(updates)) {
         if (key === '__proto__' || key === 'constructor' || key === 'prototype') continue;
         (schedules[idx] as Record<string, unknown>)[key] = value;
       }
-      saveSchedules(schedules);
+      await saveSchedules(schedules);
     }
     return schedules;
   });
 
-  ipcMain.handle('delete-backup-schedule', (_event, id: string) => {
-    const schedules = loadSchedules().filter((s) => s.id !== id);
-    saveSchedules(schedules);
+  ipcMain.handle('delete-backup-schedule', async (_event, id: string) => {
+    const schedules = (await loadSchedules()).filter((s) => s.id !== id);
+    await saveSchedules(schedules);
     return schedules;
   });
 
   // Check schedules every minute and run due backups
   setInterval(async () => {
     if (!appState.activeConnection) return;
-    const schedules = loadSchedules();
+    const schedules = await loadSchedules();
     if (schedules.length === 0) return;
     const now = new Date();
     const dayNames = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
@@ -363,11 +425,14 @@ export function registerIpcHandlers(): void {
         const ext = fmt === 'custom' ? '.dump' : fmt === 'tar' ? '.tar' : '.sql';
         const backupDirPref = path.join(app.getPath('userData'), 'backup_dir.txt');
         let bDir: string;
-        try { bDir = fs.readFileSync(backupDirPref, 'utf-8').trim(); } catch { bDir = path.join(os.homedir(), 'PostGrip_Backups'); }
-        try { fs.mkdirSync(bDir, { recursive: true }); } catch { /* ignore */ }
+        try { bDir = (await fs.promises.readFile(backupDirPref, 'utf-8')).trim(); } catch { bDir = path.join(os.homedir(), 'PostGrip_Backups'); }
+        try { await fs.promises.mkdir(bDir, { recursive: true }); } catch { /* ignore */ }
 
-        const filePath = (schedule.outputDir as string || bDir) + `/${conn.database}_scheduled_${timestamp}${ext}`;
-        const args = ['-h', conn.host, '-p', String(conn.port), '-U', conn.user, '-d', conn.database, '-f', filePath];
+        const outputDir = (typeof schedule.outputDir === 'string' && schedule.outputDir) ? schedule.outputDir : bDir;
+        assertAllowedPath(outputDir);
+        const filePath = outputDir + `/${conn.database}_scheduled_${timestamp}${ext}`;
+        const resolved = await resolveConnParams(conn);
+        const args = ['-h', resolved.host, '-p', String(resolved.port), '-U', conn.user, '-d', conn.database, '-f', filePath];
         if (fmt === 'custom') args.push('-Fc');
         else if (fmt === 'tar') args.push('-Ft');
 
@@ -380,29 +445,31 @@ export function registerIpcHandlers(): void {
         if (schedule.noOwner) args.push('--no-owner');
         if (schedule.noPrivileges) args.push('--no-acl');
 
-        const env = { ...process.env, PGPASSWORD: conn.password };
+        const env = { ...process.env, PGPASSWORD: resolved.password };
         const startTime = Date.now();
-        await execFileAsync(findPgTool('pg_dump'), args, { env, timeout: 600000 });
+        await execFileAsync(await findPgTool('pg_dump'), args, { env, timeout: 600000 });
         const durationMs = Date.now() - startTime;
 
         // Save metadata
         const meta = { database: conn.database, host: conn.host, port: conn.port, user: conn.user, format: fmt, schemas, tables, scope: (schemas.length || tables.length) ? 'selected' : 'full', dataOnly: !!schedule.dataOnly, schemaOnly: !!schedule.schemaOnly, noOwner: !!schedule.noOwner, noPrivileges: !!schedule.noPrivileges, clean: false, createDb: false, ifExists: false, compress: 0, createdAt: now.toISOString(), durationMs, scheduled: true, scheduleId: schedule.id };
-        try { fs.writeFileSync(filePath + '.meta.json', JSON.stringify(meta, null, 2)); } catch { /* ignore */ }
+        try { await fs.promises.writeFile(filePath + '.meta.json', JSON.stringify(meta, null, 2)); } catch { /* ignore */ }
 
         // Update lastRun
         schedule.lastRun = now.toISOString();
-        saveSchedules(schedules);
+        await saveSchedules(schedules);
       } catch { /* log error but continue */ }
     }
   }, 60000);
 
-  ipcMain.handle('set-backup-dir', (_event, dirPath: string) => {
+  ipcMain.handle('set-backup-dir', async (_event, dirPath: string) => {
+    assertAllowedPath(dirPath);
     const prefPath = path.join(app.getPath('userData'), 'backup_dir.txt');
-    try { fs.mkdirSync(dirPath, { recursive: true }); } catch { /* ignore */ }
-    fs.writeFileSync(prefPath, dirPath);
+    try { await fs.promises.mkdir(dirPath, { recursive: true }); } catch { /* ignore */ }
+    await fs.promises.writeFile(prefPath, dirPath);
   });
 
   ipcMain.handle('delete-backup', async (_event, filePath: string) => {
+    await assertBackupPath(filePath);
     await fs.promises.unlink(filePath);
   });
 
@@ -424,10 +491,12 @@ export function registerIpcHandlers(): void {
     noBlobs?: boolean;
   }) => {
     if (!appState.activeConnection) throw new Error('No active database connection');
+    assertAllowedPath(options.filePath);
     const conn = appState.activeConnection;
+    const { host, port, password } = await resolveConnParams(conn);
     const args = [
-      '-h', conn.host,
-      '-p', String(conn.port),
+      '-h', host,
+      '-p', String(port),
       '-U', conn.user,
       '-d', conn.database,
       '-f', options.filePath,
@@ -460,9 +529,9 @@ export function registerIpcHandlers(): void {
     if (options.blobs) args.push('--blobs');
     if (options.noBlobs) args.push('--no-blobs');
 
-    const env = { ...process.env, PGPASSWORD: conn.password };
+    const env = { ...process.env, PGPASSWORD: password };
     const startTime = Date.now();
-    await execFileAsync(findPgTool('pg_dump'), args, { env, timeout: 600000 });
+    await execFileAsync(await findPgTool('pg_dump'), args, { env, timeout: 600000 });
     const durationMs = Date.now() - startTime;
 
     // Save metadata alongside the backup
@@ -486,29 +555,41 @@ export function registerIpcHandlers(): void {
       createdAt: new Date().toISOString(),
       durationMs,
     };
-    try { fs.writeFileSync(options.filePath + '.meta.json', JSON.stringify(meta, null, 2)); } catch { /* ignore */ }
+    try { await fs.promises.writeFile(options.filePath + '.meta.json', JSON.stringify(meta, null, 2)); } catch { /* ignore */ }
 
     return { durationMs };
   });
 
   ipcMain.handle('restore-database', async (_event, filePath: string) => {
     if (!appState.activeConnection) throw new Error('No active database connection');
+    assertAllowedPath(filePath);
     const conn = appState.activeConnection;
+    const { host, port, password } = await resolveConnParams(conn);
     const ext = filePath.toLowerCase();
 
     if (ext.endsWith('.sql')) {
-      const sql = await fs.promises.readFile(filePath, 'utf-8');
-      await postgres.executeSql(conn, sql);
+      // Use psql to restore .sql dumps — it correctly handles function bodies,
+      // dollar-quoted strings, DO blocks, etc. that naive splitting would break.
+      const args = [
+        '-h', host,
+        '-p', String(port),
+        '-U', conn.user,
+        '-d', conn.database,
+        '-f', filePath,
+        '-v', 'ON_ERROR_STOP=1',
+      ];
+      const env = { ...process.env, PGPASSWORD: password };
+      await execFileAsync(await findPgTool('psql'), args, { env, timeout: 600000 });
     } else {
       const args = [
-        '-h', conn.host,
-        '-p', String(conn.port),
+        '-h', host,
+        '-p', String(port),
         '-U', conn.user,
         '-d', conn.database,
         filePath,
       ];
-      const env = { ...process.env, PGPASSWORD: conn.password };
-      await execFileAsync(findPgTool('pg_restore'), args, { env, timeout: 600000 });
+      const env = { ...process.env, PGPASSWORD: password };
+      await execFileAsync(await findPgTool('pg_restore'), args, { env, timeout: 600000 });
     }
   });
 
@@ -527,10 +608,12 @@ export function registerIpcHandlers(): void {
   });
 
   ipcMain.handle('write-file', async (_event, filePath: string, content: string) => {
+    assertAllowedPath(filePath);
     fs.writeFileSync(filePath, content, 'utf-8');
   });
 
   ipcMain.handle('list-directory', async (_event, dirPath: string) => {
+    assertAllowedPath(dirPath);
     const entries = await fs.promises.readdir(dirPath, { withFileTypes: true });
     return entries
       .filter((e) => !e.name.startsWith('.'))
@@ -547,6 +630,7 @@ export function registerIpcHandlers(): void {
   });
 
   ipcMain.handle('read-text-file', async (_event, filePath: string) => {
+    assertAllowedPath(filePath);
     const content = await fs.promises.readFile(filePath, 'utf-8');
     return content;
   });
@@ -582,6 +666,7 @@ export function registerIpcHandlers(): void {
   });
 
   ipcMain.handle('find-git-repos', async (_event, dirPath: string) => {
+    assertAllowedPath(dirPath);
     const home = os.homedir();
     // Only scan directories that don't trigger macOS TCC permission prompts
     const SCAN_DIRS = ['Developer', 'Projects', 'repos', 'src', 'code', 'workspace', 'git', 'work'];
@@ -620,6 +705,7 @@ export function registerIpcHandlers(): void {
   });
 
   ipcMain.handle('git-repo-root', async (_event, dirPath: string) => {
+    assertAllowedPath(dirPath);
     try {
       const { stdout } = await execFileAsync('git', ['rev-parse', '--show-toplevel'], { cwd: dirPath });
       return stdout.trim();
@@ -629,6 +715,7 @@ export function registerIpcHandlers(): void {
   });
 
   ipcMain.handle('git-status', async (_event, repoPath: string) => {
+    assertAllowedPath(repoPath);
     try {
       const [branchResult, statusResult, logResult] = await Promise.all([
         execFileAsync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], { cwd: repoPath }),
@@ -652,6 +739,7 @@ export function registerIpcHandlers(): void {
   });
 
   ipcMain.handle('git-diff', async (_event, repoPath: string, filePath: string) => {
+    assertAllowedPath(repoPath);
     try {
       const { stdout } = await execFileAsync('git', ['diff', 'HEAD', '--', filePath], { cwd: repoPath });
       return stdout || '(no changes)';

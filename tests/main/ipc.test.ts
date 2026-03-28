@@ -30,13 +30,18 @@ vi.mock('../../src/main/postgres', () => ({
   createTable: vi.fn().mockResolvedValue(undefined),
   executeSql: vi.fn().mockResolvedValue(undefined),
   closeAllPools: vi.fn(),
+  closePoolsForConnection: vi.fn(),
+  resolveConnParams: vi.fn().mockImplementation((conn: { host: string; port: number; password: string }) => {
+    const result = Promise.resolve({ host: conn.host, port: conn.port, password: conn.password });
+    return Object.assign(result, { host: conn.host, port: conn.port, password: conn.password });
+  }),
 }));
 
 vi.mock('../../src/main/storage', () => ({
-  loadConnections: vi.fn().mockReturnValue([]),
-  saveConnections: vi.fn(),
-  saveLastConnectionId: vi.fn(),
-  loadLastConnectionId: vi.fn().mockReturnValue(null),
+  loadConnections: vi.fn().mockResolvedValue([]),
+  saveConnections: vi.fn().mockResolvedValue(undefined),
+  saveLastConnectionId: vi.fn().mockResolvedValue(undefined),
+  loadLastConnectionId: vi.fn().mockResolvedValue(null),
 }));
 
 vi.mock('node:fs', () => ({
@@ -49,8 +54,11 @@ vi.mock('node:fs', () => ({
     promises: {
       readdir: vi.fn().mockResolvedValue([]),
       readFile: vi.fn().mockResolvedValue('file content'),
+      writeFile: vi.fn().mockResolvedValue(undefined),
       stat: vi.fn().mockResolvedValue({ size: 1024, mtime: new Date('2026-03-28T00:00:00Z') }),
       unlink: vi.fn().mockResolvedValue(undefined),
+      mkdir: vi.fn().mockResolvedValue(undefined),
+      access: vi.fn().mockResolvedValue(undefined),
     },
   },
   writeFileSync: vi.fn(),
@@ -277,7 +285,7 @@ describe('IPC handlers', () => {
       appState.activeConnection = {
         id: 'del-1', name: 'x', host: 'h', port: 5432, user: 'u', password: 'p', database: 'd',
       };
-      vi.mocked(loadConnections).mockReturnValue([]);
+      vi.mocked(loadConnections).mockResolvedValue([]);
       await invoke('delete-saved-connection', 'del-1');
       expect(appState.activeConnection).toBeNull();
     });
@@ -286,8 +294,12 @@ describe('IPC handlers', () => {
   describe('write-file', () => {
     it('writes content to disk', async () => {
       const fs = await import('node:fs');
-      await invoke('write-file', '/tmp/test.sql', 'SELECT 1;');
-      expect(fs.default.writeFileSync).toHaveBeenCalledWith('/tmp/test.sql', 'SELECT 1;', 'utf-8');
+      await invoke('write-file', '/home/testuser/test.sql', 'SELECT 1;');
+      expect(fs.default.writeFileSync).toHaveBeenCalledWith('/home/testuser/test.sql', 'SELECT 1;', 'utf-8');
+    });
+
+    it('rejects paths outside allowed directories', async () => {
+      await expect(invoke('write-file', '/etc/passwd', 'bad')).rejects.toThrow('Access denied');
     });
   });
 
@@ -318,7 +330,7 @@ describe('IPC handlers', () => {
         { name: 'file.txt', isDirectory: () => false, isFile: () => true } as never,
         { name: '.hidden', isDirectory: () => false, isFile: () => true } as never,
       ]);
-      const result = await invoke('list-directory', '/test') as Array<{ name: string; isDirectory: boolean }>;
+      const result = await invoke('list-directory', '/home/testuser/docs') as Array<{ name: string; isDirectory: boolean }>;
       // hidden files should be filtered
       expect(result).toHaveLength(2);
       // directories should sort first
@@ -326,14 +338,22 @@ describe('IPC handlers', () => {
       expect(result[0].isDirectory).toBe(true);
       expect(result[1].name).toBe('file.txt');
     });
+
+    it('rejects paths outside allowed directories', async () => {
+      await expect(invoke('list-directory', '/etc')).rejects.toThrow('Access denied');
+    });
   });
 
   describe('read-text-file', () => {
     it('returns file content', async () => {
       const fs = await import('node:fs');
       vi.mocked(fs.default.promises.readFile).mockResolvedValue('SELECT 1;');
-      const result = await invoke('read-text-file', '/test/query.sql');
+      const result = await invoke('read-text-file', '/home/testuser/query.sql');
       expect(result).toBe('SELECT 1;');
+    });
+
+    it('rejects paths outside allowed directories', async () => {
+      await expect(invoke('read-text-file', '/etc/shadow')).rejects.toThrow('Access denied');
     });
   });
 
@@ -391,8 +411,8 @@ describe('IPC handlers', () => {
       appState.activeConnection = {
         id: '1', name: 'test', host: 'localhost', port: 5432, user: 'pg', password: 'pw', database: 'db',
       };
-      await invoke('export-table-csv', 'public', 'users', '/tmp/out.csv');
-      expect(postgres.exportTableCsv).toHaveBeenCalledWith(appState.activeConnection, 'public', 'users', '/tmp/out.csv');
+      await invoke('export-table-csv', 'public', 'users', '/home/testuser/out.csv');
+      expect(postgres.exportTableCsv).toHaveBeenCalledWith(appState.activeConnection, 'public', 'users', '/home/testuser/out.csv');
     });
   });
 
@@ -428,7 +448,7 @@ describe('IPC handlers', () => {
 
   describe('activate-saved-connection', () => {
     it('throws when connection not found', async () => {
-      vi.mocked(loadConnections).mockReturnValue([]);
+      vi.mocked(loadConnections).mockResolvedValue([]);
       await expect(invoke('activate-saved-connection', 'nonexistent')).rejects.toThrow('Saved connection not found');
     });
   });
@@ -438,7 +458,7 @@ describe('IPC handlers', () => {
   describe('get-backup-dir', () => {
     it('returns default directory when no preference exists', async () => {
       const fsModule = await import('node:fs');
-      vi.mocked(fsModule.default.readFileSync).mockImplementation(() => { throw new Error('ENOENT'); });
+      vi.mocked(fsModule.default.promises.readFile).mockRejectedValueOnce(new Error('ENOENT'));
       const result = await invoke('get-backup-dir');
       expect(result).toContain('PostGrip_Backups');
     });
@@ -447,14 +467,14 @@ describe('IPC handlers', () => {
   describe('set-backup-dir', () => {
     it('writes preference file', async () => {
       const fsModule = await import('node:fs');
-      await invoke('set-backup-dir', '/custom/backup/path');
-      expect(fsModule.default.writeFileSync).toHaveBeenCalled();
+      await invoke('set-backup-dir', '/home/testuser/custom/backup/path');
+      expect(fsModule.default.promises.writeFile).toHaveBeenCalled();
     });
   });
 
   describe('list-backups', () => {
     it('returns empty array for empty directory', async () => {
-      const result = await invoke('list-backups', '/some/dir') as unknown[];
+      const result = await invoke('list-backups', '/home/testuser/some/dir') as unknown[];
       expect(result).toEqual([]);
     });
 
@@ -466,7 +486,7 @@ describe('IPC handlers', () => {
       ]);
       vi.mocked(fsModule.default.promises.stat).mockResolvedValue({ size: 2048, mtime: new Date('2026-03-28') } as never);
       vi.mocked(fsModule.default.promises.readFile).mockResolvedValue('{"format":"tar"}');
-      const result = await invoke('list-backups', '/backups') as Array<{ name: string }>;
+      const result = await invoke('list-backups', '/home/testuser/backups') as Array<{ name: string }>;
       expect(result).toHaveLength(1);
       expect(result[0].name).toBe('backup.tar');
     });
@@ -475,8 +495,16 @@ describe('IPC handlers', () => {
   describe('delete-backup', () => {
     it('calls unlink on the file', async () => {
       const fsModule = await import('node:fs');
-      await invoke('delete-backup', '/backups/old.tar');
-      expect(fsModule.default.promises.unlink).toHaveBeenCalledWith('/backups/old.tar');
+      // assertBackupPath reads backup_dir.txt — make it fall back to default dir
+      vi.mocked(fsModule.default.promises.readFile).mockRejectedValueOnce(new Error('ENOENT'));
+      await invoke('delete-backup', '/home/testuser/PostGrip_Backups/old.tar');
+      expect(fsModule.default.promises.unlink).toHaveBeenCalledWith('/home/testuser/PostGrip_Backups/old.tar');
+    });
+
+    it('rejects paths outside the backup directory', async () => {
+      const fsModule = await import('node:fs');
+      vi.mocked(fsModule.default.promises.readFile).mockRejectedValueOnce(new Error('ENOENT'));
+      await expect(invoke('delete-backup', '/etc/important')).rejects.toThrow('Access denied');
     });
   });
 
@@ -490,7 +518,7 @@ describe('IPC handlers', () => {
         id: '1', name: 'test', host: 'localhost', port: 5432, user: 'pg', password: 'pw', database: 'testdb',
       };
       const result = await invoke('backup-database', {
-        filePath: '/tmp/backup.tar', format: 'tar', noOwner: true, noPrivileges: true,
+        filePath: '/home/testuser/backup.tar', format: 'tar', noOwner: true, noPrivileges: true,
       }) as { durationMs: number };
       expect(result).toHaveProperty('durationMs');
       expect(typeof result.durationMs).toBe('number');
@@ -501,7 +529,7 @@ describe('IPC handlers', () => {
         id: '1', name: 'test', host: 'localhost', port: 5432, user: 'pg', password: 'pw', database: 'testdb',
       };
       const result = await invoke('backup-database', {
-        filePath: '/tmp/backup.sql', format: 'sql', tables: ['public.users', 'public.orders'],
+        filePath: '/home/testuser/backup.sql', format: 'sql', tables: ['public.users', 'public.orders'],
       }) as { durationMs: number };
       expect(result).toHaveProperty('durationMs');
     });
@@ -512,21 +540,20 @@ describe('IPC handlers', () => {
       await expect(invoke('restore-database', '/tmp/backup.tar')).rejects.toThrow('No active database connection');
     });
 
-    it('restores SQL files via executeSql', async () => {
+    it('restores SQL files via psql', async () => {
       appState.activeConnection = {
         id: '1', name: 'test', host: 'localhost', port: 5432, user: 'pg', password: 'pw', database: 'testdb',
       };
-      const fsModule = await import('node:fs');
-      vi.mocked(fsModule.default.promises.readFile).mockResolvedValueOnce('CREATE TABLE test (id int);');
-      await invoke('restore-database', '/tmp/backup.sql');
-      expect(postgres.executeSql).toHaveBeenCalled();
+      await invoke('restore-database', '/home/testuser/backup.sql');
+      // SQL restore now uses psql, not executeSql
+      expect(postgres.executeSql).not.toHaveBeenCalled();
     });
 
     it('restores non-SQL files via pg_restore', async () => {
       appState.activeConnection = {
         id: '1', name: 'test', host: 'localhost', port: 5432, user: 'pg', password: 'pw', database: 'testdb',
       };
-      await invoke('restore-database', '/tmp/backup.tar');
+      await invoke('restore-database', '/home/testuser/backup.tar');
       // Should not call executeSql for .tar files
       expect(postgres.executeSql).not.toHaveBeenCalled();
     });
@@ -537,7 +564,7 @@ describe('IPC handlers', () => {
   describe('list-backup-schedules', () => {
     it('returns empty array when no schedules exist', async () => {
       const fsModule = await import('node:fs');
-      vi.mocked(fsModule.default.readFileSync).mockImplementation(() => { throw new Error('ENOENT'); });
+      vi.mocked(fsModule.default.promises.readFile).mockRejectedValueOnce(new Error('ENOENT'));
       const result = await invoke('list-backup-schedules') as unknown[];
       expect(result).toEqual([]);
     });
@@ -545,7 +572,7 @@ describe('IPC handlers', () => {
     it('returns saved schedules', async () => {
       const fsModule = await import('node:fs');
       const schedules = [{ id: '1', days: ['monday'], time: '02:00' }];
-      vi.mocked(fsModule.default.readFileSync).mockReturnValue(JSON.stringify(schedules));
+      vi.mocked(fsModule.default.promises.readFile).mockResolvedValueOnce(JSON.stringify(schedules));
       const result = await invoke('list-backup-schedules') as unknown[];
       expect(result).toHaveLength(1);
     });
@@ -554,19 +581,19 @@ describe('IPC handlers', () => {
   describe('add-backup-schedule', () => {
     it('adds a schedule with generated id and createdAt', async () => {
       const fsModule = await import('node:fs');
-      vi.mocked(fsModule.default.readFileSync).mockReturnValue('[]');
+      vi.mocked(fsModule.default.promises.readFile).mockResolvedValueOnce('[]');
       const result = await invoke('add-backup-schedule', { days: ['monday', 'friday'], time: '03:00', format: 'tar' }) as Record<string, unknown>;
       expect(result).toHaveProperty('id');
       expect(result).toHaveProperty('createdAt');
       expect(result.days).toEqual(['monday', 'friday']);
-      expect(fsModule.default.writeFileSync).toHaveBeenCalled();
+      expect(fsModule.default.promises.writeFile).toHaveBeenCalled();
     });
   });
 
   describe('update-backup-schedule', () => {
     it('updates an existing schedule', async () => {
       const fsModule = await import('node:fs');
-      vi.mocked(fsModule.default.readFileSync).mockReturnValue(JSON.stringify([{ id: 's1', days: ['monday'], time: '02:00' }]));
+      vi.mocked(fsModule.default.promises.readFile).mockResolvedValueOnce(JSON.stringify([{ id: 's1', days: ['monday'], time: '02:00' }]));
       const result = await invoke('update-backup-schedule', 's1', { time: '04:00' }) as Array<{ id: string; time: string }>;
       expect(result).toHaveLength(1);
       expect(result[0].time).toBe('04:00');
@@ -574,7 +601,7 @@ describe('IPC handlers', () => {
 
     it('does nothing for unknown schedule id', async () => {
       const fsModule = await import('node:fs');
-      vi.mocked(fsModule.default.readFileSync).mockReturnValue(JSON.stringify([{ id: 's1', time: '02:00' }]));
+      vi.mocked(fsModule.default.promises.readFile).mockResolvedValueOnce(JSON.stringify([{ id: 's1', time: '02:00' }]));
       const result = await invoke('update-backup-schedule', 'nonexistent', { time: '04:00' }) as Array<{ time: string }>;
       expect(result).toHaveLength(1);
       expect(result[0].time).toBe('02:00');
@@ -584,7 +611,7 @@ describe('IPC handlers', () => {
   describe('delete-backup-schedule', () => {
     it('removes a schedule by id', async () => {
       const fsModule = await import('node:fs');
-      vi.mocked(fsModule.default.readFileSync).mockReturnValue(JSON.stringify([{ id: 's1' }, { id: 's2' }]));
+      vi.mocked(fsModule.default.promises.readFile).mockResolvedValueOnce(JSON.stringify([{ id: 's1' }, { id: 's2' }]));
       const result = await invoke('delete-backup-schedule', 's1') as Array<{ id: string }>;
       expect(result).toHaveLength(1);
       expect(result[0].id).toBe('s2');
@@ -612,15 +639,15 @@ describe('IPC handlers', () => {
 
   describe('export-table-parquet', () => {
     it('throws without connection', async () => {
-      await expect(invoke('export-table-parquet', 'public', 'users', '/tmp/out.parquet')).rejects.toThrow('No active database connection');
+      await expect(invoke('export-table-parquet', 'public', 'users', '/home/testuser/out.parquet')).rejects.toThrow('No active database connection');
     });
 
     it('delegates to postgres.exportTableParquet', async () => {
       appState.activeConnection = {
         id: '1', name: 'test', host: 'localhost', port: 5432, user: 'pg', password: 'pw', database: 'db',
       };
-      const result = await invoke('export-table-parquet', 'public', 'users', '/tmp/out.parquet');
-      expect(postgres.exportTableParquet).toHaveBeenCalledWith(appState.activeConnection, 'public', 'users', '/tmp/out.parquet');
+      const result = await invoke('export-table-parquet', 'public', 'users', '/home/testuser/out.parquet');
+      expect(postgres.exportTableParquet).toHaveBeenCalledWith(appState.activeConnection, 'public', 'users', '/home/testuser/out.parquet');
       expect(result).toBe(10);
     });
   });
@@ -671,7 +698,7 @@ describe('IPC handlers', () => {
   describe('update-backup-schedule prototype pollution protection', () => {
     it('ignores __proto__ keys in updates', async () => {
       const fsModule = await import('node:fs');
-      vi.mocked(fsModule.default.readFileSync).mockReturnValue(JSON.stringify([{ id: 's1', time: '02:00' }]));
+      vi.mocked(fsModule.default.promises.readFile).mockResolvedValueOnce(JSON.stringify([{ id: 's1', time: '02:00' }]));
       const result = await invoke('update-backup-schedule', 's1', { __proto__: { polluted: true }, time: '05:00' }) as Array<{ id: string; time: string }>;
       expect(result[0].time).toBe('05:00');
       expect(({} as Record<string, unknown>).polluted).toBeUndefined();
@@ -679,7 +706,7 @@ describe('IPC handlers', () => {
 
     it('ignores constructor key in updates', async () => {
       const fsModule = await import('node:fs');
-      vi.mocked(fsModule.default.readFileSync).mockReturnValue(JSON.stringify([{ id: 's1', time: '02:00' }]));
+      vi.mocked(fsModule.default.promises.readFile).mockResolvedValueOnce(JSON.stringify([{ id: 's1', time: '02:00' }]));
       await invoke('update-backup-schedule', 's1', { constructor: 'bad', time: '06:00' });
       expect(({} as Record<string, unknown>).constructor).toBe(Object);
     });

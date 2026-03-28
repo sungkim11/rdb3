@@ -7,10 +7,18 @@ vi.mock('node:fs', () => ({
     existsSync: vi.fn(),
     readFileSync: vi.fn(),
     writeFileSync: vi.fn(),
+    promises: {
+      readFile: vi.fn(),
+      writeFile: vi.fn().mockResolvedValue(undefined),
+    },
   },
   existsSync: vi.fn(),
   readFileSync: vi.fn(),
   writeFileSync: vi.fn(),
+  promises: {
+    readFile: vi.fn(),
+    writeFile: vi.fn().mockResolvedValue(undefined),
+  },
 }));
 
 import fs from 'node:fs';
@@ -43,95 +51,93 @@ describe('storage', () => {
   });
 
   describe('loadConnections', () => {
-    it('returns empty array when file does not exist', () => {
-      vi.mocked(fs.existsSync).mockReturnValue(false);
-      const result = loadConnections();
+    it('returns empty array when file does not exist', async () => {
+      vi.mocked(fs.promises.readFile).mockRejectedValue(new Error('ENOENT'));
+      const result = await loadConnections();
       expect(result).toEqual([]);
     });
 
-    it('loads and parses connections from file', () => {
-      vi.mocked(fs.existsSync).mockReturnValue(true);
-      vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockConnections));
-      const result = loadConnections();
+    it('loads and parses connections from file', async () => {
+      vi.mocked(fs.promises.readFile).mockResolvedValue(JSON.stringify(mockConnections));
+      const result = await loadConnections();
       expect(result).toEqual(mockConnections);
       expect(result).toHaveLength(2);
       expect(result[0].name).toBe('Dev DB');
     });
 
-    it('reads from the correct file path', () => {
-      vi.mocked(fs.existsSync).mockReturnValue(true);
-      vi.mocked(fs.readFileSync).mockReturnValue('[]');
-      loadConnections();
-      const readPath = vi.mocked(fs.readFileSync).mock.calls[0][0] as string;
+    it('reads from the correct file path', async () => {
+      vi.mocked(fs.promises.readFile).mockResolvedValue('[]');
+      await loadConnections();
+      const readPath = vi.mocked(fs.promises.readFile).mock.calls[0][0] as string;
       expect(readPath).toContain('connections.json');
     });
   });
 
   describe('saveConnections', () => {
-    it('writes connections to file as JSON', () => {
-      saveConnections(mockConnections);
-      expect(fs.writeFileSync).toHaveBeenCalledTimes(1);
-      const [, content, encoding] = vi.mocked(fs.writeFileSync).mock.calls[0];
+    it('writes connections to file as JSON', async () => {
+      await saveConnections(mockConnections);
+      expect(fs.promises.writeFile).toHaveBeenCalledTimes(1);
+      const [, content, encoding] = vi.mocked(fs.promises.writeFile).mock.calls[0];
       expect(encoding).toBe('utf-8');
       const parsed = JSON.parse(content as string);
       expect(parsed).toEqual(mockConnections);
     });
 
-    it('writes pretty-printed JSON', () => {
-      saveConnections(mockConnections);
-      const content = vi.mocked(fs.writeFileSync).mock.calls[0][1] as string;
+    it('writes pretty-printed JSON', async () => {
+      await saveConnections(mockConnections);
+      const content = vi.mocked(fs.promises.writeFile).mock.calls[0][1] as string;
       expect(content).toContain('\n');
       expect(content).toContain('  ');
     });
 
-    it('handles empty array', () => {
-      saveConnections([]);
-      const content = vi.mocked(fs.writeFileSync).mock.calls[0][1] as string;
+    it('handles empty array', async () => {
+      await saveConnections([]);
+      const content = vi.mocked(fs.promises.writeFile).mock.calls[0][1] as string;
       expect(JSON.parse(content)).toEqual([]);
     });
   });
 
   describe('saveLastConnectionId', () => {
-    it('writes connection id to file', () => {
-      saveLastConnectionId('conn-123');
-      expect(fs.writeFileSync).toHaveBeenCalledTimes(1);
-      const [filePath, content, encoding] = vi.mocked(fs.writeFileSync).mock.calls[0];
+    it('writes connection id to file', async () => {
+      await saveLastConnectionId('conn-123');
+      expect(fs.promises.writeFile).toHaveBeenCalledTimes(1);
+      const [filePath, content, encoding] = vi.mocked(fs.promises.writeFile).mock.calls[0];
       expect(filePath).toContain('last_connection.txt');
       expect(content).toBe('conn-123');
       expect(encoding).toBe('utf-8');
     });
 
-    it('overwrites previous id', () => {
-      saveLastConnectionId('conn-1');
-      saveLastConnectionId('conn-2');
-      const content = vi.mocked(fs.writeFileSync).mock.calls[1][1] as string;
+    it('overwrites previous id', async () => {
+      await saveLastConnectionId('conn-1');
+      await saveLastConnectionId('conn-2');
+      const content = vi.mocked(fs.promises.writeFile).mock.calls[1][1] as string;
       expect(content).toBe('conn-2');
     });
   });
 
   describe('loadLastConnectionId', () => {
-    it('returns id from file', () => {
-      vi.mocked(fs.readFileSync).mockReturnValue('conn-123');
-      const result = loadLastConnectionId();
+    it('returns id from file', async () => {
+      vi.mocked(fs.promises.readFile).mockResolvedValue('conn-123');
+      const result = await loadLastConnectionId();
       expect(result).toBe('conn-123');
     });
 
-    it('trims whitespace', () => {
-      vi.mocked(fs.readFileSync).mockReturnValue('  conn-123  \n');
-      const result = loadLastConnectionId();
+    it('trims whitespace', async () => {
+      vi.mocked(fs.promises.readFile).mockResolvedValue('  conn-123  \n');
+      const result = await loadLastConnectionId();
       expect(result).toBe('conn-123');
     });
 
-    it('returns null when file does not exist', () => {
-      vi.mocked(fs.readFileSync).mockImplementation(() => { throw new Error('ENOENT'); });
-      const result = loadLastConnectionId();
+    it('returns null when file does not exist', async () => {
+      vi.mocked(fs.promises.readFile).mockRejectedValue(new Error('ENOENT'));
+      const result = await loadLastConnectionId();
       expect(result).toBeNull();
     });
 
-    it('reads from correct file path', () => {
-      vi.mocked(fs.readFileSync).mockReturnValue('x');
-      loadLastConnectionId();
-      const readPath = vi.mocked(fs.readFileSync).mock.calls[0][0] as string;
+    it('reads from correct file path', async () => {
+      vi.mocked(fs.promises.readFile).mockResolvedValue('x');
+      await loadLastConnectionId();
+      const readPath = vi.mocked(fs.promises.readFile).mock.calls[0][0] as string;
       expect(readPath).toContain('last_connection.txt');
     });
   });

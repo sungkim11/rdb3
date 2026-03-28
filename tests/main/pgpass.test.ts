@@ -36,7 +36,10 @@ vi.mock('pg', () => ({
 // Mock ssh-tunnel to avoid import issues
 vi.mock('../../src/main/ssh-tunnel', () => ({
   openTunnel: vi.fn(),
+  openEphemeralTunnel: vi.fn().mockResolvedValue({ localPort: 54321, close: vi.fn() }),
   closeAllTunnels: vi.fn(),
+  closeTunnelsForSsh: vi.fn(),
+  closeTunnelFor: vi.fn(),
 }));
 
 import * as postgres from '../../src/main/postgres';
@@ -98,8 +101,8 @@ describe('pgpass integration', () => {
   });
 
   it('routes through SSH tunnel when ssh is enabled', async () => {
-    const { openTunnel } = await import('../../src/main/ssh-tunnel');
-    vi.mocked(openTunnel).mockResolvedValue(65432);
+    const { openEphemeralTunnel } = await import('../../src/main/ssh-tunnel');
+    vi.mocked(openEphemeralTunnel).mockResolvedValue({ localPort: 65432, close: vi.fn() });
 
     const conn: SavedConnection = {
       id: '1', name: 'test', host: 'db.internal', port: 5432,
@@ -116,7 +119,7 @@ describe('pgpass integration', () => {
       },
     };
     await postgres.testConnection(conn);
-    expect(openTunnel).toHaveBeenCalled();
+    expect(openEphemeralTunnel).toHaveBeenCalled();
     expect(capturedConfig.host).toBe('127.0.0.1');
     expect(capturedConfig.port).toBe(65432);
   });
