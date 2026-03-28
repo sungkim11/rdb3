@@ -103,6 +103,7 @@
     "@codemirror/language": "^6.10.8",
     "@codemirror/state": "^6.5.2",
     "@codemirror/view": "^6.36.5",
+    "parquetjs-lite": "^0.8.7",
     "pg": "^8.13.3",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",

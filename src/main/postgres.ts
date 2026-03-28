@@ -439,16 +439,38 @@ export async function createSchema(conn: SavedConnection, schemaName: string): P
   }
 }
 
-export async function createTable(conn: SavedConnection, schema: string, tableName: string, columns: Array<{ name: string; type: string; nullable: boolean; defaultValue?: string }>): Promise<void> {
+export async function createTable(conn: SavedConnection, schema: string, tableName: string, columns: Array<{ name: string; type: string; nullable: boolean; defaultValue?: string; pk?: boolean }>, foreignKeys?: Array<{ column: string; refTable: string; refColumn: string }>, indexes?: Array<{ name?: string; columns: string; unique?: boolean }>): Promise<void> {
   const client = await connect(conn);
   try {
-    const colDefs = columns.map((c) => {
+    const qt = `${quoteIdentifier(schema)}.${quoteIdentifier(tableName)}`;
+    const lines: string[] = [];
+    for (const c of columns) {
       let def = `${quoteIdentifier(c.name)} ${c.type}`;
       if (!c.nullable) def += ' NOT NULL';
       if (c.defaultValue) def += ` DEFAULT ${c.defaultValue}`;
-      return def;
-    });
-    await client.query(`CREATE TABLE ${quoteIdentifier(schema)}.${quoteIdentifier(tableName)} (\n  ${colDefs.join(',\n  ')}\n)`);
+      lines.push(def);
+    }
+    const pkCols = columns.filter((c) => c.pk);
+    if (pkCols.length > 0) {
+      lines.push(`PRIMARY KEY (${pkCols.map((c) => quoteIdentifier(c.name)).join(', ')})`);
+    }
+    if (foreignKeys) {
+      for (const fk of foreignKeys) {
+        if (fk.column && fk.refTable && fk.refColumn) {
+          lines.push(`FOREIGN KEY (${quoteIdentifier(fk.column)}) REFERENCES ${fk.refTable} (${quoteIdentifier(fk.refColumn)})`);
+        }
+      }
+    }
+    await client.query(`CREATE TABLE ${qt} (\n  ${lines.join(',\n  ')}\n)`);
+    if (indexes) {
+      for (const idx of indexes) {
+        if (idx.columns) {
+          const idxName = idx.name || `idx_${tableName}_${idx.columns.replace(/,\s*/g, '_')}`;
+          const unique = idx.unique ? 'UNIQUE ' : '';
+          await client.query(`CREATE ${unique}INDEX ${quoteIdentifier(idxName)} ON ${qt} (${idx.columns})`);
+        }
+      }
+    }
   } finally {
     client.release();
   }
@@ -478,7 +500,7 @@ export async function fetchTree(conn: SavedConnection): Promise<SchemaNode[]> {
     const { rows } = await client.query(
       `SELECT t.table_schema, t.table_name, t.table_type, c.column_name, c.data_type, c.is_nullable, c.column_default
        FROM information_schema.tables t
-       JOIN information_schema.columns c
+       LEFT JOIN information_schema.columns c
          ON c.table_schema = t.table_schema AND c.table_name = t.table_name
        WHERE t.table_schema NOT IN ('pg_catalog', 'information_schema')
        ORDER BY t.table_schema, t.table_name, c.ordinal_position`
@@ -492,7 +514,7 @@ export async function fetchTree(conn: SavedConnection): Promise<SchemaNode[]> {
       const schemaName: string = row.table_schema;
       const tableName: string = row.table_name;
       const tableType: string = row.table_type;
-      const columnName: string = row.column_name;
+      const columnName: string | null = row.column_name;
       const dataType: string = row.data_type;
       const isNullable: string = row.is_nullable;
       const defaultValue: string | null = row.column_default;
@@ -507,6 +529,9 @@ export async function fetchTree(conn: SavedConnection): Promise<SchemaNode[]> {
         schemaMap.get(schemaName)!.push(tableName);
         tableMap.set(key, { name: tableName, tableType, columns: [], keys: [], indexes: [] });
       }
+
+      // Skip if no columns (LEFT JOIN produced null)
+      if (!columnName) continue;
 
       const col: ColumnNode = {
         name: columnName,
@@ -579,6 +604,20 @@ export async function fetchTree(conn: SavedConnection): Promise<SchemaNode[]> {
           columns: row.columns,
         };
         table.indexes.push(indexNode);
+      }
+    }
+
+    // Include empty schemas that have no tables
+    const { rows: allSchemas } = await client.query(
+      `SELECT schema_name FROM information_schema.schemata
+       WHERE schema_name NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
+       ORDER BY schema_name`
+    );
+    for (const row of allSchemas) {
+      const name: string = row.schema_name;
+      if (!schemaMap.has(name)) {
+        schemaOrder.push(name);
+        schemaMap.set(name, []);
       }
     }
 
@@ -1122,6 +1161,58 @@ export async function alterTable(
       await client.query('ROLLBACK');
       throw err;
     }
+  } finally {
+    client.release();
+  }
+}
+
+export async function exportTableParquet(
+  conn: SavedConnection,
+  schema: string,
+  table: string,
+  filePath: string,
+): Promise<number> {
+  const client = await connect(conn);
+  try {
+    const sqlText = `SELECT * FROM ${quoteIdentifier(schema)}.${quoteIdentifier(table)}`;
+    const result = await client.query(sqlText);
+    const columns = result.fields ?? [];
+
+    // Map PG OIDs to Parquet types
+    const pgToParquet: Record<number, string> = {
+      16: 'BOOLEAN',    // bool
+      20: 'INT64',      // int8
+      21: 'INT32',      // int2
+      23: 'INT32',      // int4
+      700: 'FLOAT',     // float4
+      701: 'DOUBLE',    // float8
+      1700: 'DOUBLE',   // numeric
+    };
+
+    const { ParquetSchema, ParquetWriter } = await import('parquetjs-lite');
+    const schemaDef: Record<string, { type: string; optional: boolean }> = {};
+    for (const col of columns) {
+      const pType = pgToParquet[col.dataTypeID] ?? 'UTF8';
+      schemaDef[col.name] = { type: pType, optional: true };
+    }
+    const parquetSchema = new ParquetSchema(schemaDef);
+    const writer = await ParquetWriter.openFile(parquetSchema, filePath);
+
+    for (const row of result.rows ?? []) {
+      const record: Record<string, unknown> = {};
+      for (const col of columns) {
+        const val = row[col.name];
+        if (val == null) continue;
+        const pType = pgToParquet[col.dataTypeID];
+        if (pType === 'BOOLEAN') record[col.name] = Boolean(val);
+        else if (pType === 'INT32' || pType === 'INT64') record[col.name] = Number(val);
+        else if (pType === 'FLOAT' || pType === 'DOUBLE') record[col.name] = Number(val);
+        else record[col.name] = String(val);
+      }
+      await writer.appendRow(record);
+    }
+    await writer.close();
+    return (result.rows ?? []).length;
   } finally {
     client.release();
   }

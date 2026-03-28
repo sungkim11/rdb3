@@ -32,6 +32,8 @@ vi.mock('../../src/main/postgres', () => ({
 vi.mock('../../src/main/storage', () => ({
   loadConnections: vi.fn().mockReturnValue([]),
   saveConnections: vi.fn(),
+  saveLastConnectionId: vi.fn(),
+  loadLastConnectionId: vi.fn().mockReturnValue(null),
 }));
 
 vi.mock('node:fs', () => ({

@@ -21,3 +21,15 @@ export function saveConnections(connections: SavedConnection[]): void {
   const filePath = connectionsPath();
   fs.writeFileSync(filePath, JSON.stringify(connections, null, 2), 'utf-8');
 }
+
+const LAST_CONNECTION_FILE = 'last_connection.txt';
+
+export function saveLastConnectionId(id: string): void {
+  const filePath = path.join(app.getPath('userData'), LAST_CONNECTION_FILE);
+  fs.writeFileSync(filePath, id, 'utf-8');
+}
+
+export function loadLastConnectionId(): string | null {
+  const filePath = path.join(app.getPath('userData'), LAST_CONNECTION_FILE);
+  try { return fs.readFileSync(filePath, 'utf-8').trim(); } catch { return null; }
+}

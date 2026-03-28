@@ -200,7 +200,7 @@ export function AppShell() {
   const [destructiveTableDialog, setDestructiveTableDialog] = useState<DestructiveTableDialogState>(null);
   const [destructiveCascade, setDestructiveCascade] = useState(false);
   const [modifyTableInfo, setModifyTableInfo] = useState<ModifyTableInfo | null>(null);
-  const [modifyTableDraft, setModifyTableDraft] = useState<{ columns: ModifyTableColumn[]; newTableName: string; addColumns: Array<{ name: string; dataType: string; nullable: boolean; defaultValue: string }>; dropColumns: Set<string> }>({ columns: [], newTableName: '', addColumns: [], dropColumns: new Set() });
+  const [modifyTableDraft, setModifyTableDraft] = useState<{ columns: ModifyTableColumn[]; newTableName: string; addColumns: Array<{ name: string; dataType: string; nullable: boolean; defaultValue: string }>; dropColumns: Set<string>; addForeignKeys: Array<{ column: string; refTable: string; refColumn: string }>; addIndexes: Array<{ name: string; columns: string; unique: boolean }> }>({ columns: [], newTableName: '', addColumns: [], dropColumns: new Set(), addForeignKeys: [], addIndexes: [] });
   const [modifyTableError, setModifyTableError] = useState('');
   const [testStatus, setTestStatus] = useState<'idle' | 'testing' | 'success' | 'fail'>('idle');
   const [connectionTab, setConnectionTab] = useState<'general' | 'ssh'>('general');
@@ -701,8 +701,9 @@ export function AppShell() {
     setShowCreateSchemaModal(false);
     try {
       setLoading(`Creating schema ${schemaName}...`);
-      const next = await api.createSchema(schemaName);
-      setSnapshot(next);
+      await api.createSchema(schemaName);
+      const refreshed = await api.bootstrap();
+      setSnapshot(refreshed);
       setLoading('');
     } catch (err) {
       setLoading('');
@@ -710,12 +711,14 @@ export function AppShell() {
     }
   }
 
-  async function handleCreateTable(schema: string, tableName: string, columns: Array<{ name: string; type: string; nullable: boolean; defaultValue?: string }>) {
+  async function handleCreateTable(schema: string, tableName: string, columns: Array<{ name: string; type: string; nullable: boolean; defaultValue?: string; pk?: boolean }>, foreignKeys?: Array<{ column: string; refTable: string; refColumn: string }>, indexes?: Array<{ name?: string; columns: string; unique?: boolean }>) {
     setShowCreateTableModal(false);
     try {
       setLoading(`Creating table ${schema}.${tableName}...`);
-      const next = await api.createTable(schema, tableName, columns);
-      setSnapshot(next);
+      await api.createTable(schema, tableName, columns, foreignKeys, indexes);
+      // Refresh tree separately to ensure we see the new table
+      const refreshed = await api.bootstrap();
+      setSnapshot(refreshed);
       setLoading('');
     } catch (err) {
       setLoading('');
@@ -1130,6 +1133,24 @@ export function AppShell() {
     }
   }
 
+  async function handleExportParquet(schema: string, table: string) {
+    try {
+      const path = await api.showSaveDialog({
+        defaultPath: `${schema}.${table}.parquet`,
+        filters: [{ name: 'Parquet Files', extensions: ['parquet'] }],
+      });
+      if (!path) return;
+      setLoading(`Exporting ${schema}.${table} to Parquet...`);
+      setError(null);
+      const count = await api.exportTableParquet(schema, table, path);
+      setLoading(`Exported ${count} rows to Parquet.`);
+      setTimeout(() => setLoading(''), 3000);
+    } catch (err) {
+      setLoading('');
+      setError(errorMessage(err));
+    }
+  }
+
   async function handleDropTable(schema: string, table: string, cascade: boolean) {
     try {
       setLoading(`Dropping ${schema}.${table}${cascade ? ' (CASCADE)' : ''}...`);
@@ -1439,6 +1460,8 @@ export function AppShell() {
         newTableName: info.table,
         addColumns: [],
         dropColumns: new Set(),
+        addForeignKeys: [],
+        addIndexes: [],
       });
       setModifyTableError('');
       setLoading('');
@@ -1541,8 +1564,10 @@ export function AppShell() {
   async function handleApplyModifyTable() {
     if (!modifyTableInfo) return;
     const actions = buildModifyActions();
+    const fks = modifyTableDraft.addForeignKeys.filter((fk) => fk.column && fk.refTable && fk.refColumn);
+    const idxs = modifyTableDraft.addIndexes.filter((idx) => idx.columns.trim());
 
-    if (actions.length === 0) {
+    if (actions.length === 0 && fks.length === 0 && idxs.length === 0) {
       setModifyTableInfo(null);
       return;
     }
@@ -1550,8 +1575,26 @@ export function AppShell() {
     try {
       setLoading('Applying table modifications...');
       setModifyTableError('');
-      const next = await api.alterTable(modifyTableInfo.schema, modifyTableInfo.table, actions);
-      setSnapshot(next);
+      const qi = (v: string) => `"${v.replace(/"/g, '""')}"`;
+      const qt = `${qi(modifyTableInfo.schema)}.${qi(modifyTableInfo.table)}`;
+
+      if (actions.length > 0) {
+        await api.alterTable(modifyTableInfo.schema, modifyTableInfo.table, actions);
+      }
+      // Add foreign keys
+      for (const fk of fks) {
+        await api.runQuery(`ALTER TABLE ${qt} ADD FOREIGN KEY (${qi(fk.column)}) REFERENCES ${fk.refTable} (${qi(fk.refColumn)})`);
+      }
+      // Add indexes
+      for (const idx of idxs) {
+        const tableName = modifyTableDraft.newTableName || modifyTableInfo.table;
+        const idxName = idx.name.trim() || `idx_${tableName}_${idx.columns.trim().replace(/,\s*/g, '_')}`;
+        const unique = idx.unique ? 'UNIQUE ' : '';
+        await api.runQuery(`CREATE ${unique}INDEX ${qi(idxName)} ON ${qt} (${idx.columns.trim()})`);
+      }
+
+      const refreshed = await api.bootstrap();
+      setSnapshot(refreshed);
       setModifyTableInfo(null);
       setLoading('');
     } catch (err) {
@@ -2060,18 +2103,17 @@ export function AppShell() {
               <span className="text-gray-500"><RefreshIcon /></span>
               Refresh
             </button>
-            <div className="mx-2 my-1 border-t border-black/5" />
             <button
               className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] text-black hover:bg-white/40"
               onClick={() => {
                 const { schema, table } = contextMenu;
                 setContextMenu(null);
-                void handleShowDdl(schema, table);
+                void handleOpenModifyTable(schema, table);
               }}
               type="button"
             >
-              <span className="text-gray-500"><QueryIcon /></span>
-              Show DDL
+              <span className="text-gray-500"><ModifyIcon /></span>
+              Modify Table
             </button>
             <button
               className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] text-black hover:bg-white/40"
@@ -2091,7 +2133,7 @@ export function AppShell() {
               onClick={() => {
                 const { schema, table } = contextMenu;
                 setContextMenu(null);
-                void handleExportTable(schema, table);
+                void handleExportFullTableCsv(schema, table);
               }}
               type="button"
             >
@@ -2103,12 +2145,12 @@ export function AppShell() {
               onClick={() => {
                 const { schema, table } = contextMenu;
                 setContextMenu(null);
-                void handleExportFullTableCsv(schema, table);
+                void handleExportParquet(schema, table);
               }}
               type="button"
             >
               <span className="text-gray-500"><ExportIcon /></span>
-              Export CSV (full table)
+              Export Parquet
             </button>
             <button
               className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] text-black hover:bg-white/40"
@@ -2121,19 +2163,6 @@ export function AppShell() {
             >
               <span className="text-gray-500"><ExportIcon /></span>
               Export with pg_dump
-            </button>
-            <div className="mx-2 my-1 border-t border-black/5" />
-            <button
-              className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] text-black hover:bg-white/40"
-              onClick={() => {
-                const { schema, table } = contextMenu;
-                setContextMenu(null);
-                void handleOpenModifyTable(schema, table);
-              }}
-              type="button"
-            >
-              <span className="text-gray-500"><ModifyIcon /></span>
-              Modify Table
             </button>
             <div className="mx-2 my-1 border-t border-black/5" />
             <button
@@ -2241,7 +2270,7 @@ export function AppShell() {
       ) : null}
 
       {showCreateTableModal ? (
-        <CreateTableModal schema={createTableSchema} onClose={() => setShowCreateTableModal(false)} onCreate={handleCreateTable} />
+        <CreateTableModal schema={createTableSchema} tree={databaseTree} onClose={() => setShowCreateTableModal(false)} onCreate={handleCreateTable} />
       ) : null}
 
       {destructiveTableDialog ? (() => {
@@ -2334,230 +2363,178 @@ export function AppShell() {
       ) : null}
 
       {modifyTableInfo ? (
-        <div className="fixed inset-0 z-40 grid place-items-center bg-black/20 backdrop-blur-sm p-4">
-          <div className="glass-panel-strong w-full max-w-2xl rounded-2xl shadow-xl max-h-[80vh] flex flex-col">
-            <div className="border-b border-black/5 px-5 py-3 shrink-0">
-              <div className="text-[13px] font-medium text-black">Modify Table — {modifyTableInfo.schema}.{modifyTableInfo.table}</div>
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm" onClick={() => setModifyTableInfo(null)}>
+          <div className="glass-panel-strong flex h-[85vh] w-[700px] max-w-[90vw] flex-col overflow-hidden rounded-2xl shadow-2xl" onClick={(e) => e.stopPropagation()}>
+            <div className="flex h-10 shrink-0 items-center justify-between border-b border-black/5 px-4">
+              <span className="text-[14px] font-medium text-black">Modify Table — {modifyTableInfo.schema}.{modifyTableInfo.table}</span>
+              <button className="text-[18px] text-gray-400 hover:text-black" onClick={() => setModifyTableInfo(null)} type="button">&times;</button>
             </div>
-            <div className="flex-1 overflow-auto p-5">
+            <div className="flex-1 overflow-y-auto px-5 py-4">
               <div className="mb-4">
-                <Field label="Table Name">
-                  <input
-                    className="input"
-                    value={modifyTableDraft.newTableName}
-                    onChange={(e) => setModifyTableDraft((d) => ({ ...d, newTableName: e.target.value }))}
-                  />
-                </Field>
+                <label className="mb-1 block text-[12px] font-medium text-black">Table Name</label>
+                <input className="input text-[12px]" value={modifyTableDraft.newTableName} onChange={(e) => setModifyTableDraft((d) => ({ ...d, newTableName: e.target.value }))} />
               </div>
 
-              <div className="mb-3 text-[11px] font-medium uppercase tracking-[0.08em] text-black">Columns</div>
-              <div className="overflow-x-auto">
-                <table className="w-full border-collapse text-[12px]">
+              <div className="mb-4 overflow-hidden rounded-lg border border-black/10">
+                <table className="min-w-full border-collapse text-[12px]" style={{ tableLayout: 'fixed' }}>
+                  <colgroup><col /><col /><col style={{ width: 55 }} /><col style={{ width: 55 }} /><col /><col style={{ width: 24 }} /></colgroup>
                   <thead>
-                    <tr className="text-left text-[11px] font-medium uppercase tracking-[0.08em] text-gray-500">
-                      <th className="px-2 py-1.5 border-b border-black/10">Name</th>
-                      <th className="px-2 py-1.5 border-b border-black/10">Type</th>
-                      <th className="px-2 py-1.5 border-b border-black/10 text-center">Nullable</th>
-                      <th className="px-2 py-1.5 border-b border-black/10">Default</th>
-                      <th className="px-2 py-1.5 border-b border-black/10 w-8"></th>
+                    <tr><td colSpan={4} className="px-2 py-1.5 text-[12px] font-semibold text-black">Columns</td><td colSpan={2} className="px-1 py-1 text-right"><button className="w-[104px] rounded border border-[var(--accent)] py-0.5 text-center text-[11px] text-[var(--accent)] hover:bg-[var(--accent)]/10" onClick={() => setModifyTableDraft((d) => ({ ...d, addColumns: [...d.addColumns, { name: '', dataType: 'text', nullable: true, defaultValue: '' }] }))} type="button">+ Add Column</button></td></tr>
+                    <tr>
+                      <th className="border-b border-black/8 px-2 py-1 text-left text-[11px] font-medium text-gray-500">Name</th>
+                      <th className="border-b border-black/8 px-2 py-1 text-left text-[11px] font-medium text-gray-500">Type</th>
+                      <th className="border-b border-black/8 px-2 py-1 text-center text-[11px] font-medium text-gray-500">Primary</th>
+                      <th className="border-b border-black/8 px-2 py-1 text-center text-[11px] font-medium text-gray-500">Null</th>
+                      <th className="border-b border-black/8 px-2 py-1 text-left text-[11px] font-medium text-gray-500">Default</th>
+                      <th className="border-b border-black/8" />
                     </tr>
                   </thead>
                   <tbody>
                     {modifyTableDraft.columns.map((col, i) => {
-                      const isDropped = modifyTableDraft.dropColumns.has(modifyTableInfo.columns[i].name);
+                      const isDropped = modifyTableDraft.dropColumns.has(modifyTableInfo.columns[i]?.name);
+                      const schemaNode = databaseTree.find((s) => s.name === modifyTableInfo.schema);
+                      const tableNode = schemaNode?.tables.find((t) => t.name === modifyTableInfo.table);
+                      const pkKey = (tableNode?.keys ?? []).find((k) => k.type === 'PRIMARY KEY');
+                      const pkCols = Array.isArray(pkKey?.columns) ? pkKey.columns : [];
+                      const isPk = pkCols.includes(modifyTableInfo.columns[i]?.name);
                       return (
-                        <tr key={modifyTableInfo.columns[i].name} className={isDropped ? 'opacity-30 line-through' : ''}>
-                          <td className="px-2 py-1 border-b border-black/5">
-                            <input
-                              className="input w-full"
-                              value={col.name}
-                              disabled={isDropped}
-                              onChange={(e) => {
-                                const val = e.target.value;
-                                setModifyTableDraft((d) => {
-                                  const cols = [...d.columns];
-                                  cols[i] = { ...cols[i], name: val };
-                                  return { ...d, columns: cols };
-                                });
-                              }}
-                            />
-                          </td>
-                          <td className="px-2 py-1 border-b border-black/5">
-                            <input
-                              className="input w-full"
-                              value={col.dataType}
-                              disabled={isDropped}
-                              onChange={(e) => {
-                                const val = e.target.value;
-                                setModifyTableDraft((d) => {
-                                  const cols = [...d.columns];
-                                  cols[i] = { ...cols[i], dataType: val };
-                                  return { ...d, columns: cols };
-                                });
-                              }}
-                            />
-                          </td>
-                          <td className="px-2 py-1 border-b border-black/5 text-center">
-                            <input
-                              type="checkbox"
-                              checked={col.nullable}
-                              disabled={isDropped}
-                              onChange={(e) => {
-                                const val = e.target.checked;
-                                setModifyTableDraft((d) => {
-                                  const cols = [...d.columns];
-                                  cols[i] = { ...cols[i], nullable: val };
-                                  return { ...d, columns: cols };
-                                });
-                              }}
-                            />
-                          </td>
-                          <td className="px-2 py-1 border-b border-black/5">
-                            <input
-                              className="input w-full"
-                              value={col.defaultValue ?? ''}
-                              disabled={isDropped}
-                              placeholder="none"
-                              onChange={(e) => {
-                                const val = e.target.value;
-                                setModifyTableDraft((d) => {
-                                  const cols = [...d.columns];
-                                  cols[i] = { ...cols[i], defaultValue: val || null };
-                                  return { ...d, columns: cols };
-                                });
-                              }}
-                            />
-                          </td>
-                          <td className="px-2 py-1 border-b border-black/5">
-                            <button
-                              className="text-[11px] text-red-400 hover:text-red-600"
-                              title={isDropped ? 'Undo drop' : 'Drop column'}
-                              onClick={() => {
-                                const origName = modifyTableInfo.columns[i].name;
-                                setModifyTableDraft((d) => {
-                                  const next = new Set(d.dropColumns);
-                                  if (next.has(origName)) {
-                                    next.delete(origName);
-                                  } else {
-                                    next.add(origName);
-                                  }
-                                  return { ...d, dropColumns: next };
-                                });
-                              }}
-                              type="button"
-                            >
-                              {isDropped ? 'undo' : 'drop'}
-                            </button>
-                          </td>
+                        <tr key={modifyTableInfo.columns[i]?.name ?? i} className={isDropped ? 'opacity-30 line-through' : 'border-b border-black/5'}>
+                          <td className="px-1 py-1"><input className="input py-1 text-[12px]" value={col.name} disabled={isDropped} onChange={(e) => { const val = e.target.value; setModifyTableDraft((d) => { const cols = [...d.columns]; cols[i] = { ...cols[i], name: val }; return { ...d, columns: cols }; }); }} /></td>
+                          <td className="px-1 py-1"><select className="input py-1 text-[12px]" value={col.dataType} disabled={isDropped} onChange={(e) => { const val = e.target.value; setModifyTableDraft((d) => { const cols = [...d.columns]; cols[i] = { ...cols[i], dataType: val }; return { ...d, columns: cols }; }); }}>{!COMMON_TYPES.includes(col.dataType) ? <option value={col.dataType}>{col.dataType}</option> : null}{COMMON_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}</select></td>
+                          <td className="px-1 py-1 text-center"><input type="checkbox" checked={isPk} disabled title="Primary keys cannot be changed via Modify Table" /></td>
+                          <td className="px-1 py-1 text-center"><input type="checkbox" checked={col.nullable} disabled={isDropped} onChange={(e) => { const val = e.target.checked; setModifyTableDraft((d) => { const cols = [...d.columns]; cols[i] = { ...cols[i], nullable: val }; return { ...d, columns: cols }; }); }} /></td>
+                          <td className="px-1 py-1"><input className="input py-1 text-[12px]" value={col.defaultValue ?? ''} disabled={isDropped} placeholder="none" onChange={(e) => { const val = e.target.value; setModifyTableDraft((d) => { const cols = [...d.columns]; cols[i] = { ...cols[i], defaultValue: val || null }; return { ...d, columns: cols }; }); }} /></td>
+                          <td className="px-1 py-1 text-center"><button className="text-red-400 hover:text-red-600" title={isDropped ? 'Undo' : 'Drop'} onClick={() => { const origName = modifyTableInfo.columns[i].name; setModifyTableDraft((d) => { const next = new Set(d.dropColumns); if (next.has(origName)) next.delete(origName); else next.add(origName); return { ...d, dropColumns: next }; }); }} type="button">{isDropped ? '\u21A9' : '\u00D7'}</button></td>
                         </tr>
                       );
                     })}
                     {modifyTableDraft.addColumns.map((col, i) => (
-                      <tr key={`new-${i}`} className="bg-emerald-50/40">
-                        <td className="px-2 py-1 border-b border-black/5">
-                          <input
-                            className="input w-full"
-                            value={col.name}
-                            placeholder="column_name"
-                            onChange={(e) => {
-                              const val = e.target.value;
-                              setModifyTableDraft((d) => {
-                                const adds = [...d.addColumns];
-                                adds[i] = { ...adds[i], name: val };
-                                return { ...d, addColumns: adds };
-                              });
-                            }}
-                          />
-                        </td>
-                        <td className="px-2 py-1 border-b border-black/5">
-                          <input
-                            className="input w-full"
-                            value={col.dataType}
-                            placeholder="text"
-                            onChange={(e) => {
-                              const val = e.target.value;
-                              setModifyTableDraft((d) => {
-                                const adds = [...d.addColumns];
-                                adds[i] = { ...adds[i], dataType: val };
-                                return { ...d, addColumns: adds };
-                              });
-                            }}
-                          />
-                        </td>
-                        <td className="px-2 py-1 border-b border-black/5 text-center">
-                          <input
-                            type="checkbox"
-                            checked={col.nullable}
-                            onChange={(e) => {
-                              const val = e.target.checked;
-                              setModifyTableDraft((d) => {
-                                const adds = [...d.addColumns];
-                                adds[i] = { ...adds[i], nullable: val };
-                                return { ...d, addColumns: adds };
-                              });
-                            }}
-                          />
-                        </td>
-                        <td className="px-2 py-1 border-b border-black/5">
-                          <input
-                            className="input w-full"
-                            value={col.defaultValue}
-                            placeholder="none"
-                            onChange={(e) => {
-                              const val = e.target.value;
-                              setModifyTableDraft((d) => {
-                                const adds = [...d.addColumns];
-                                adds[i] = { ...adds[i], defaultValue: val };
-                                return { ...d, addColumns: adds };
-                              });
-                            }}
-                          />
-                        </td>
-                        <td className="px-2 py-1 border-b border-black/5">
-                          <button
-                            className="text-[11px] text-red-400 hover:text-red-600"
-                            title="Remove"
-                            onClick={() => {
-                              setModifyTableDraft((d) => ({
-                                ...d,
-                                addColumns: d.addColumns.filter((_, j) => j !== i),
-                              }));
-                            }}
-                            type="button"
-                          >
-                            remove
-                          </button>
-                        </td>
+                      <tr key={`new-${i}`} className="border-b border-black/5 bg-emerald-50/30">
+                        <td className="px-1 py-1"><input className="input py-1 text-[12px]" value={col.name} placeholder="column_name" onChange={(e) => { const val = e.target.value; setModifyTableDraft((d) => { const adds = [...d.addColumns]; adds[i] = { ...adds[i], name: val }; return { ...d, addColumns: adds }; }); }} /></td>
+                        <td className="px-1 py-1"><select className="input py-1 text-[12px]" value={col.dataType} onChange={(e) => { const val = e.target.value; setModifyTableDraft((d) => { const adds = [...d.addColumns]; adds[i] = { ...adds[i], dataType: val }; return { ...d, addColumns: adds }; }); }}>{COMMON_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}</select></td>
+                        <td className="px-1 py-1 text-center" />
+                        <td className="px-1 py-1 text-center"><input type="checkbox" checked={col.nullable} onChange={(e) => { const val = e.target.checked; setModifyTableDraft((d) => { const adds = [...d.addColumns]; adds[i] = { ...adds[i], nullable: val }; return { ...d, addColumns: adds }; }); }} /></td>
+                        <td className="px-1 py-1"><input className="input py-1 text-[12px]" value={col.defaultValue} placeholder="none" onChange={(e) => { const val = e.target.value; setModifyTableDraft((d) => { const adds = [...d.addColumns]; adds[i] = { ...adds[i], defaultValue: val }; return { ...d, addColumns: adds }; }); }} /></td>
+                        <td className="px-1 py-1 text-center"><button className="text-red-400 hover:text-red-600" onClick={() => setModifyTableDraft((d) => ({ ...d, addColumns: d.addColumns.filter((_, j) => j !== i) }))} type="button">&times;</button></td>
                       </tr>
                     ))}
                   </tbody>
+                  <tbody>
+                    <tr><td colSpan={4} className="border-t-2 border-black/8 px-2 py-1.5 text-[12px] font-semibold text-black">Foreign Keys</td><td colSpan={2} className="border-t-2 border-black/8 px-1 py-1 text-right"><button className="w-[104px] rounded border border-[var(--accent)] py-0.5 text-center text-[11px] text-[var(--accent)] hover:bg-[var(--accent)]/10" onClick={() => setModifyTableDraft((d) => ({ ...d, addForeignKeys: [...d.addForeignKeys, { column: '', refTable: '', refColumn: '' }] }))} type="button">+ Add FK</button></td></tr>
+                    <tr>
+                      <th className="border-b border-black/8 px-2 py-1 text-left text-[11px] font-medium text-gray-500">Source Column</th>
+                      <th className="border-b border-black/8 px-2 py-1 text-left text-[11px] font-medium text-gray-500">Reference Table</th>
+                      <th colSpan={2} className="border-b border-black/8" />
+                      <th className="border-b border-black/8 px-2 py-1 text-left text-[11px] font-medium text-gray-500">Reference Column</th>
+                      <th className="border-b border-black/8" />
+                    </tr>
+                    {modifyTableDraft.addForeignKeys.length === 0 ? (
+                      <tr><td colSpan={6} className="px-2 py-1.5 text-[11px] text-gray-400">No new foreign keys</td></tr>
+                    ) : modifyTableDraft.addForeignKeys.map((fk, i) => {
+                      const allCols = [...modifyTableDraft.columns.filter((c) => !modifyTableDraft.dropColumns.has(modifyTableInfo.columns[modifyTableDraft.columns.indexOf(c)]?.name ?? '')).map((c) => c.name), ...modifyTableDraft.addColumns.filter((c) => c.name.trim()).map((c) => c.name.trim())];
+                      const ref = fk.refTable.trim();
+                      const parts = ref.includes('.') ? ref.split('.') : [modifyTableInfo.schema, ref];
+                      const refSchema = databaseTree.find((s) => s.name === parts[0]);
+                      const refTable = refSchema?.tables.find((t) => t.name === parts[1]);
+                      return (
+                        <tr key={`mfk-${i}`} className="border-b border-black/5 bg-emerald-50/30">
+                          <td className="px-1 py-1"><select className="input py-1 text-[12px]" value={fk.column} onChange={(e) => setModifyTableDraft((d) => { const fks = [...d.addForeignKeys]; fks[i] = { ...fks[i], column: e.target.value }; return { ...d, addForeignKeys: fks }; })}><option value="">Source Column</option>{allCols.map((c) => <option key={c} value={c}>{c}</option>)}</select></td>
+                          <td className="px-1 py-1">
+                            <select className="input py-1 text-[12px]" value={fk.refTable} onChange={(e) => setModifyTableDraft((d) => { const fks = [...d.addForeignKeys]; fks[i] = { ...fks[i], refTable: e.target.value }; return { ...d, addForeignKeys: fks }; })}>
+                              <option value="">Reference Table</option>
+                              {databaseTree.flatMap((s) => s.tables.map((t) => <option key={`${s.name}.${t.name}`} value={`${s.name}.${t.name}`}>{s.name}.{t.name}</option>))}
+                            </select>
+                          </td>
+                          <td colSpan={2} />
+                          <td className="px-1 py-1"><select className="input py-1 text-[12px]" value={fk.refColumn} onChange={(e) => setModifyTableDraft((d) => { const fks = [...d.addForeignKeys]; fks[i] = { ...fks[i], refColumn: e.target.value }; return { ...d, addForeignKeys: fks }; })}><option value="">Reference Column</option>{(refTable?.columns ?? []).map((c) => <option key={c.name} value={c.name}>{c.name}</option>)}</select></td>
+                          <td className="px-1 py-1 text-center"><button className="text-red-400 hover:text-red-600" onClick={() => setModifyTableDraft((d) => ({ ...d, addForeignKeys: d.addForeignKeys.filter((_, j) => j !== i) }))} type="button">&times;</button></td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                  <tbody>
+                    <tr><td colSpan={4} className="border-t-2 border-black/8 px-2 py-1.5 text-[12px] font-semibold text-black">Indexes</td><td colSpan={2} className="border-t-2 border-black/8 px-1 py-1 text-right"><button className="w-[104px] rounded border border-[var(--accent)] py-0.5 text-center text-[11px] text-[var(--accent)] hover:bg-[var(--accent)]/10" onClick={() => setModifyTableDraft((d) => ({ ...d, addIndexes: [...d.addIndexes, { name: '', columns: '', unique: false }] }))} type="button">+ Add Index</button></td></tr>
+                    <tr>
+                      <th className="border-b border-black/8 px-2 py-1 text-left text-[11px] font-medium text-gray-500">Index Name (optional)</th>
+                      <th className="border-b border-black/8 px-2 py-1 text-left text-[11px] font-medium text-gray-500">Table Columns</th>
+                      <th className="border-b border-black/8 px-2 py-1 text-center text-[11px] font-medium text-gray-500">Unique</th>
+                      <th colSpan={2} className="border-b border-black/8" />
+                      <th className="border-b border-black/8" />
+                    </tr>
+                    {modifyTableDraft.addIndexes.length === 0 ? (
+                      <tr><td colSpan={6} className="px-2 py-1.5 text-[11px] text-gray-400">No new indexes</td></tr>
+                    ) : modifyTableDraft.addIndexes.map((idx, i) => {
+                      const allCols = [...modifyTableDraft.columns.filter((c) => !modifyTableDraft.dropColumns.has(modifyTableInfo.columns[modifyTableDraft.columns.indexOf(c)]?.name ?? '')).map((c) => c.name), ...modifyTableDraft.addColumns.filter((c) => c.name.trim()).map((c) => c.name.trim())];
+                      return (
+                        <tr key={`midx-${i}`} className="border-b border-black/5 bg-emerald-50/30">
+                          <td className="px-1 py-1"><input className="input py-1 text-[12px]" value={idx.name} onChange={(e) => setModifyTableDraft((d) => { const idxs = [...d.addIndexes]; idxs[i] = { ...idxs[i], name: e.target.value }; return { ...d, addIndexes: idxs }; })} placeholder="auto-generated" /></td>
+                          <td className="px-1 py-1"><IndexColumnPicker availableColumns={allCols} selected={idx.columns} onChange={(val) => setModifyTableDraft((d) => { const idxs = [...d.addIndexes]; idxs[i] = { ...idxs[i], columns: val }; return { ...d, addIndexes: idxs }; })} /></td>
+                          <td className="px-1 py-1 text-center"><input type="checkbox" checked={idx.unique} onChange={(e) => setModifyTableDraft((d) => { const idxs = [...d.addIndexes]; idxs[i] = { ...idxs[i], unique: e.target.checked }; return { ...d, addIndexes: idxs }; })} /></td>
+                          <td colSpan={2} />
+                          <td className="px-1 py-1 text-center"><button className="text-red-400 hover:text-red-600" onClick={() => setModifyTableDraft((d) => ({ ...d, addIndexes: d.addIndexes.filter((_, j) => j !== i) }))} type="button">&times;</button></td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
                 </table>
               </div>
-              <button
-                className="mt-2 rounded-lg border border-dashed border-black/10 px-3 py-1.5 text-[12px] text-gray-500 hover:border-black/20 hover:text-black"
-                onClick={() => {
-                  setModifyTableDraft((d) => ({
-                    ...d,
-                    addColumns: [...d.addColumns, { name: '', dataType: 'text', nullable: true, defaultValue: '' }],
-                  }));
-                }}
-                type="button"
-              >
-                + Add Column
-              </button>
 
-              <div className="mt-4">
-                <div className="mb-1.5 text-[11px] font-medium uppercase tracking-[0.08em] text-black">DDL Preview</div>
-                <pre className="max-h-[160px] overflow-auto rounded-lg border border-black/10 bg-gray-50/80 px-3 py-2 font-mono text-[11px] text-gray-700 whitespace-pre-wrap">{modifyPreviewDdl}</pre>
+
+              <div className="overflow-hidden rounded-lg border border-black/10">
+                <div className="px-3 py-1.5 text-[12px] font-semibold text-black">DDL Preview</div>
+                <pre className="overflow-x-auto border-t border-black/10 bg-gray-50 p-3 font-mono text-[11px] leading-relaxed text-black whitespace-pre-wrap">{(() => {
+                  const qi = (v: string) => `"${v.replace(/"/g, '""')}"`;
+                  const tableName = modifyTableDraft.newTableName || modifyTableInfo.table;
+                  const qt = `${qi(modifyTableInfo.schema)}.${qi(tableName)}`;
+
+                  const colDefs: string[] = [];
+                  for (let i = 0; i < modifyTableDraft.columns.length; i++) {
+                    const orig = modifyTableInfo.columns[i];
+                    if (!orig || modifyTableDraft.dropColumns.has(orig.name)) continue;
+                    const col = modifyTableDraft.columns[i];
+                    let def = `  ${qi(col.name)} ${col.dataType}`;
+                    if (!col.nullable) def += ' NOT NULL';
+                    if (col.defaultValue) def += ` DEFAULT ${col.defaultValue}`;
+                    colDefs.push(def);
+                  }
+                  for (const col of modifyTableDraft.addColumns) {
+                    if (!col.name.trim()) continue;
+                    let def = `  ${qi(col.name.trim())} ${col.dataType}`;
+                    if (!col.nullable) def += ' NOT NULL';
+                    if (col.defaultValue.trim()) def += ` DEFAULT ${col.defaultValue.trim()}`;
+                    colDefs.push(def);
+                  }
+                  for (const fk of modifyTableDraft.addForeignKeys) {
+                    if (fk.column && fk.refTable && fk.refColumn) {
+                      colDefs.push(`  FOREIGN KEY (${qi(fk.column)}) REFERENCES ${fk.refTable} (${qi(fk.refColumn)})`);
+                    }
+                  }
+
+                  let ddl = `CREATE TABLE ${qt} (\n${colDefs.join(',\n')}\n);`;
+
+                  for (const idx of modifyTableDraft.addIndexes) {
+                    if (idx.columns.trim()) {
+                      const idxName = idx.name.trim() || `idx_${tableName}_${idx.columns.trim().replace(/,\s*/g, '_')}`;
+                      const unique = idx.unique ? 'UNIQUE ' : '';
+                      ddl += `\n\nCREATE ${unique}INDEX ${qi(idxName)}\n  ON ${qt} (${idx.columns.trim()});`;
+                    }
+                  }
+
+                  if (modifyPreviewDdl && modifyPreviewDdl !== '-- No changes') {
+                    ddl += '\n\n-- Pending ALTER statements:\n' + modifyPreviewDdl;
+                  }
+
+                  return ddl;
+                })()}</pre>
               </div>
 
               {modifyTableError ? (
                 <div className="mt-3 rounded-lg bg-red-50 px-3 py-2 text-[12px] text-red-600">{modifyTableError}</div>
               ) : null}
             </div>
-            <div className="flex items-center justify-end gap-2 border-t border-black/5 px-5 py-3 shrink-0">
-              <button className="rounded-lg border border-black/10 px-3 py-1.5 text-[12px] text-gray-500 hover:text-black" onClick={() => setModifyTableInfo(null)} type="button">Cancel</button>
-              <button className="rounded-lg bg-[var(--accent)] px-3 py-1.5 text-[12px] text-white hover:opacity-90" onClick={() => void handleApplyModifyTable()} type="button">Apply Changes</button>
+            <div className="flex items-center justify-end gap-2 border-t border-black/5 px-5 py-3">
+              <button className="rounded-lg border border-black/10 px-4 py-1.5 text-[12px] text-gray-500 hover:text-black" onClick={() => setModifyTableInfo(null)} type="button">Cancel</button>
+              <button className="rounded-lg bg-[var(--accent)] px-4 py-1.5 text-[12px] text-white hover:opacity-90" onClick={() => void handleApplyModifyTable()} type="button">Apply Changes</button>
             </div>
           </div>
         </div>
@@ -2744,6 +2721,45 @@ export function AppShell() {
   );
 }
 
+function IndexColumnPicker({ availableColumns, selected, onChange }: { availableColumns: string[]; selected: string; onChange: (val: string) => void }) {
+  const [open, setOpen] = useState(false);
+  const selectedCols = selected ? selected.split(',').map((s) => s.trim()).filter(Boolean) : [];
+
+  function toggle(col: string) {
+    const next = selectedCols.includes(col)
+      ? selectedCols.filter((c) => c !== col)
+      : [...selectedCols, col];
+    onChange(next.join(', '));
+  }
+
+  return (
+    <div className="relative">
+      <button
+        className="input flex w-full items-center justify-between py-1 text-left text-[12px]"
+        onClick={() => setOpen((c) => !c)}
+        type="button"
+      >
+        <span className={selectedCols.length > 0 ? 'truncate text-black' : 'text-gray-400'}>
+          {selectedCols.length > 0 ? selectedCols.join(', ') : 'Select columns'}
+        </span>
+        <span className="text-[9px] text-gray-400">{open ? '\u25B4' : '\u25BE'}</span>
+      </button>
+      {open ? (
+        <div className="absolute left-0 top-full z-50 mt-1 max-h-[150px] w-full overflow-y-auto rounded-lg border border-black/10 bg-white py-1 shadow-lg">
+          {availableColumns.length === 0 ? (
+            <div className="px-3 py-1.5 text-[11px] text-gray-400">Add columns first</div>
+          ) : availableColumns.map((col) => (
+            <label key={col} className="flex cursor-pointer items-center gap-2 px-3 py-1 text-[12px] text-black hover:bg-gray-50">
+              <input type="checkbox" checked={selectedCols.includes(col)} onChange={() => toggle(col)} />
+              {col}
+            </label>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function CreateSchemaModal({ onClose, onCreate }: { onClose: () => void; onCreate: (name: string) => void }) {
   const [name, setName] = useState('');
   return (
@@ -2763,22 +2779,38 @@ function CreateSchemaModal({ onClose, onCreate }: { onClose: () => void; onCreat
   );
 }
 
-function CreateTableModal({ schema, onClose, onCreate }: { schema: string; onClose: () => void; onCreate: (schema: string, tableName: string, columns: Array<{ name: string; type: string; nullable: boolean; defaultValue?: string }>) => void }) {
+function CreateTableModal({ schema, tree, onClose, onCreate }: { schema: string; tree: SchemaNode[]; onClose: () => void; onCreate: (schema: string, tableName: string, columns: Array<{ name: string; type: string; nullable: boolean; pk?: boolean; defaultValue?: string }>, foreignKeys?: Array<{ column: string; refTable: string; refColumn: string }>, indexes?: Array<{ name?: string; columns: string; unique?: boolean }>) => void }) {
   const [tableName, setTableName] = useState('');
-  const [columns, setColumns] = useState<Array<{ name: string; type: string; nullable: boolean; defaultValue: string }>>([
-    { name: 'id', type: 'serial', nullable: false, defaultValue: '' },
-  ]);
+  const [columns, setColumns] = useState<Array<{ name: string; type: string; nullable: boolean; pk: boolean; defaultValue: string }>>([]);
+  const [foreignKeys, setForeignKeys] = useState<Array<{ column: string; refTable: string; refColumn: string }>>([]);
+  const [indexes, setIndexes] = useState<Array<{ name: string; columns: string; unique: boolean }>>([]);
 
   function addColumn() {
-    setColumns((prev) => [...prev, { name: '', type: 'text', nullable: true, defaultValue: '' }]);
+    setColumns((prev) => [...prev, { name: '', type: 'text', nullable: true, pk: false, defaultValue: '' }]);
   }
-
   function updateColumn(index: number, field: string, value: string | boolean) {
     setColumns((prev) => prev.map((c, i) => i === index ? { ...c, [field]: value } : c));
   }
-
   function removeColumn(index: number) {
     setColumns((prev) => prev.filter((_, i) => i !== index));
+  }
+  function addForeignKey() {
+    setForeignKeys((prev) => [...prev, { column: '', refTable: '', refColumn: '' }]);
+  }
+  function updateFk(index: number, field: string, value: string) {
+    setForeignKeys((prev) => prev.map((fk, i) => i === index ? { ...fk, [field]: value } : fk));
+  }
+  function removeFk(index: number) {
+    setForeignKeys((prev) => prev.filter((_, i) => i !== index));
+  }
+  function addIndex() {
+    setIndexes((prev) => [...prev, { name: '', columns: '', unique: false }]);
+  }
+  function updateIndex(index: number, field: string, value: string | boolean) {
+    setIndexes((prev) => prev.map((idx, i) => i === index ? { ...idx, [field]: value } : idx));
+  }
+  function removeIndex(index: number) {
+    setIndexes((prev) => prev.filter((_, i) => i !== index));
   }
 
   function handleCreate() {
@@ -2786,16 +2818,64 @@ function CreateTableModal({ schema, onClose, onCreate }: { schema: string; onClo
       name: c.name.trim(),
       type: c.type,
       nullable: c.nullable,
+      pk: c.pk,
       defaultValue: c.defaultValue.trim() || undefined,
     }));
-    if (tableName.trim() && cols.length > 0) onCreate(schema, tableName.trim(), cols);
+    const fks = foreignKeys.filter((fk) => fk.column.trim() && fk.refTable.trim() && fk.refColumn.trim());
+    const idxs = indexes.filter((idx) => idx.columns.trim()).map((idx) => ({
+      name: idx.name.trim() || undefined,
+      columns: idx.columns.trim(),
+      unique: idx.unique,
+    }));
+    if (tableName.trim() && cols.length > 0) onCreate(schema, tableName.trim(), cols, fks.length > 0 ? fks : undefined, idxs.length > 0 ? idxs : undefined);
   }
 
-  const COMMON_TYPES = ['serial', 'bigserial', 'integer', 'bigint', 'smallint', 'text', 'varchar(255)', 'boolean', 'timestamp', 'timestamptz', 'date', 'numeric', 'real', 'double precision', 'uuid', 'jsonb', 'json', 'bytea'];
+  // COMMON_TYPES is defined at module level
+
+  function buildSqlPreview(): string {
+    const cols = columns.filter((c) => c.name.trim());
+    if (!tableName.trim() || cols.length === 0) return '-- Enter a table name and at least one column';
+    const qt = `"${schema}"."${tableName.trim()}"`;
+    const lines: string[] = [];
+
+    // Column definitions
+    for (const c of cols) {
+      let def = `  "${c.name.trim()}" ${c.type}`;
+      if (!c.nullable) def += ' NOT NULL';
+      if (c.defaultValue.trim()) def += ` DEFAULT ${c.defaultValue.trim()}`;
+      lines.push(def);
+    }
+
+    // Primary key
+    const pkCols = columns.filter((c) => c.name.trim() && c.pk);
+    if (pkCols.length > 0) {
+      lines.push(`  PRIMARY KEY (${pkCols.map((c) => `"${c.name.trim()}"`).join(', ')})`);
+    }
+
+    // Foreign keys
+    for (const fk of foreignKeys) {
+      if (fk.column.trim() && fk.refTable.trim() && fk.refColumn.trim()) {
+        lines.push(`  FOREIGN KEY ("${fk.column.trim()}") REFERENCES ${fk.refTable.trim()} ("${fk.refColumn.trim()}")`);
+      }
+    }
+
+    let sql = `CREATE TABLE ${qt} (\n${lines.join(',\n')}\n);`;
+
+    // Indexes
+    for (const idx of indexes) {
+      if (idx.columns.trim()) {
+        const idxName = idx.name.trim() || `idx_${tableName.trim()}_${idx.columns.trim().replace(/,\s*/g, '_')}`;
+        const unique = idx.unique ? 'UNIQUE ' : '';
+        sql += `\n\nCREATE ${unique}INDEX "${idxName}"\n  ON ${qt} (${idx.columns.trim()});`;
+      }
+    }
+
+    return sql;
+  }
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm" onClick={onClose}>
-      <div className="glass-panel-strong flex h-[70vh] w-[600px] max-w-[90vw] flex-col overflow-hidden rounded-2xl shadow-2xl" onClick={(e) => e.stopPropagation()}>
+      <div className="glass-panel-strong flex h-[85vh] w-[700px] max-w-[90vw] flex-col overflow-hidden rounded-2xl shadow-2xl" onClick={(e) => e.stopPropagation()}>
         <div className="flex h-10 shrink-0 items-center justify-between border-b border-black/5 px-4">
           <span className="text-[14px] font-medium text-black">Create Table in {schema}</span>
           <button className="text-[18px] text-gray-400 hover:text-black" onClick={onClose} type="button">&times;</button>
@@ -2805,38 +2885,112 @@ function CreateTableModal({ schema, onClose, onCreate }: { schema: string; onClo
             <label className="mb-1 block text-[12px] font-medium text-black">Table Name</label>
             <input className="input text-[12px]" value={tableName} onChange={(e) => setTableName(e.target.value)} placeholder="new_table" autoFocus />
           </div>
-          <div className="mb-2 flex items-center justify-between">
-            <label className="text-[12px] font-medium text-black">Columns</label>
-            <button className="rounded border border-[var(--accent)] px-2 py-0.5 text-[11px] text-[var(--accent)] hover:bg-[var(--accent)]/10" onClick={addColumn} type="button">+ Add Column</button>
-          </div>
-          <table className="min-w-full border-collapse text-[12px]">
+
+          <div className="mb-4 overflow-hidden rounded-lg border border-black/10">
+          <table className="min-w-full border-collapse text-[12px]" style={{ tableLayout: 'fixed' }}>
+            <colgroup><col /><col /><col style={{ width: 55 }} /><col style={{ width: 55 }} /><col /><col style={{ width: 24 }} /></colgroup>
             <thead>
+              <tr><td colSpan={4} className="px-2 py-1.5 text-[12px] font-semibold text-black">Columns</td><td colSpan={2} className="px-1 py-1 text-right"><button className="w-[104px] rounded border border-[var(--accent)] py-0.5 text-center text-[11px] font-normal text-[var(--accent)] hover:bg-[var(--accent)]/10" onClick={addColumn} type="button">+ Add Column</button></td></tr>
               <tr>
-                <th className="border-b border-black/8 px-2 py-1 text-left font-medium text-black">Name</th>
-                <th className="border-b border-black/8 px-2 py-1 text-left font-medium text-black">Type</th>
-                <th className="border-b border-black/8 px-2 py-1 text-left font-medium text-black">Nullable</th>
-                <th className="border-b border-black/8 px-2 py-1 text-left font-medium text-black">Default</th>
-                <th className="border-b border-black/8 px-2 py-1 w-8" />
+                <th className="border-b border-black/8 px-2 py-1 text-left text-[11px] font-medium text-gray-500">Name</th>
+                <th className="border-b border-black/8 px-2 py-1 text-left text-[11px] font-medium text-gray-500">Type</th>
+                <th className="border-b border-black/8 px-2 py-1 text-center text-[11px] font-medium text-gray-500">Primary</th>
+                <th className="border-b border-black/8 px-2 py-1 text-center text-[11px] font-medium text-gray-500">Null</th>
+                <th className="border-b border-black/8 px-2 py-1 text-left text-[11px] font-medium text-gray-500">Default</th>
+                <th className="border-b border-black/8 px-2 py-1" />
               </tr>
             </thead>
             <tbody>
               {columns.map((col, i) => (
-                <tr key={i} className="border-b border-black/5">
+                <tr key={`col-${i}`} className="border-b border-black/5">
                   <td className="px-1 py-1"><input className="input py-1 text-[12px]" value={col.name} onChange={(e) => updateColumn(i, 'name', e.target.value)} placeholder="column_name" /></td>
                   <td className="px-1 py-1">
                     <select className="input py-1 text-[12px]" value={col.type} onChange={(e) => updateColumn(i, 'type', e.target.value)}>
                       {COMMON_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
                     </select>
                   </td>
+                  <td className="px-1 py-1 text-center"><input type="checkbox" checked={col.pk} onChange={(e) => updateColumn(i, 'pk', e.target.checked)} /></td>
                   <td className="px-1 py-1 text-center"><input type="checkbox" checked={col.nullable} onChange={(e) => updateColumn(i, 'nullable', e.target.checked)} /></td>
                   <td className="px-1 py-1"><input className="input py-1 text-[12px]" value={col.defaultValue} onChange={(e) => updateColumn(i, 'defaultValue', e.target.value)} placeholder="optional" /></td>
-                  <td className="px-1 py-1 text-center">
-                    <button className="text-red-400 hover:text-red-600" onClick={() => removeColumn(i)} type="button">&times;</button>
+                  <td className="px-1 py-1 text-center"><button className="text-red-400 hover:text-red-600" onClick={() => removeColumn(i)} type="button">&times;</button></td>
+                </tr>
+              ))}
+              <tr><td colSpan={4} className="border-t-2 border-black/8 px-2 py-1.5 text-[12px] font-semibold text-black">Foreign Keys</td><td colSpan={2} className="border-t-2 border-black/8 px-1 py-1 text-right"><button className="w-[104px] rounded border border-[var(--accent)] py-0.5 text-center text-[11px] text-[var(--accent)] hover:bg-[var(--accent)]/10" onClick={addForeignKey} type="button">+ Add FK</button></td></tr>
+              <tr>
+                <th className="border-b border-black/8 px-2 py-1 text-left text-[11px] font-medium text-gray-500">Source Column</th>
+                <th className="border-b border-black/8 px-2 py-1 text-left text-[11px] font-medium text-gray-500">Reference Table</th>
+                <th colSpan={2} className="border-b border-black/8" />
+                <th className="border-b border-black/8 px-2 py-1 text-left text-[11px] font-medium text-gray-500">Reference Column</th>
+                <th className="border-b border-black/8" />
+              </tr>
+              {foreignKeys.length === 0 ? (
+                <tr><td colSpan={6} className="px-2 py-1.5 text-[11px] text-gray-400">No foreign keys</td></tr>
+              ) : foreignKeys.map((fk, i) => (
+                <tr key={`fk-${i}`} className="border-b border-black/5">
+                  <td className="px-1 py-1">
+                    <select className="input py-1 text-[12px]" value={fk.column} onChange={(e) => updateFk(i, 'column', e.target.value)}>
+                      <option value="">Source Column</option>
+                      {columns.filter((c) => c.name.trim()).map((c) => <option key={c.name} value={c.name.trim()}>{c.name.trim()}</option>)}
+                    </select>
                   </td>
+                  <td className="px-1 py-1">
+                    <select className="input py-1 text-[12px]" value={fk.refTable} onChange={(e) => updateFk(i, 'refTable', e.target.value)}>
+                      <option value="">Reference Table</option>
+                      {tree.flatMap((s) => s.tables.map((t) => <option key={`${s.name}.${t.name}`} value={`${s.name}.${t.name}`}>{s.name}.{t.name}</option>))}
+                    </select>
+                  </td>
+                  <td colSpan={2} />
+                  <td className="px-1 py-1">
+                    {(() => {
+                      const ref = fk.refTable.trim();
+                      const parts = ref.includes('.') ? ref.split('.') : [schema, ref];
+                      const s = tree.find((sc) => sc.name === parts[0]);
+                      const t = s?.tables.find((tb) => tb.name === parts[1]);
+                      const cols = t?.columns ?? [];
+                      return (
+                        <select className="input py-1 text-[12px]" value={fk.refColumn} onChange={(e) => updateFk(i, 'refColumn', e.target.value)}>
+                          <option value="">Reference Column</option>
+                          {cols.map((c) => <option key={c.name} value={c.name}>{c.name}</option>)}
+                        </select>
+                      );
+                    })()}
+                  </td>
+                  <td className="px-1 py-1 text-center"><button className="text-red-400 hover:text-red-600" onClick={() => removeFk(i)} type="button">&times;</button></td>
+                </tr>
+              ))}
+              <tr><td colSpan={4} className="border-t-2 border-black/8 px-2 py-1.5 text-[12px] font-semibold text-black">Indexes</td><td colSpan={2} className="border-t-2 border-black/8 px-1 py-1 text-right"><button className="w-[104px] rounded border border-[var(--accent)] py-0.5 text-center text-[11px] text-[var(--accent)] hover:bg-[var(--accent)]/10" onClick={addIndex} type="button">+ Add Index</button></td></tr>
+              <tr>
+                <th className="border-b border-black/8 px-2 py-1 text-left text-[11px] font-medium text-gray-500">Index Name (optional)</th>
+                <th className="border-b border-black/8 px-2 py-1 text-left text-[11px] font-medium text-gray-500">Table Columns</th>
+                <th className="border-b border-black/8 px-2 py-1 text-center text-[11px] font-medium text-gray-500">Unique</th>
+                <th colSpan={2} className="border-b border-black/8" />
+                <th className="border-b border-black/8" />
+              </tr>
+              {indexes.length === 0 ? (
+                <tr><td colSpan={6} className="px-2 py-1.5 text-[11px] text-gray-400">No indexes</td></tr>
+              ) : indexes.map((idx, i) => (
+                <tr key={`idx-${i}`} className="border-b border-black/5">
+                  <td className="px-1 py-1"><input className="input py-1 text-[12px]" value={idx.name} onChange={(e) => updateIndex(i, 'name', e.target.value)} placeholder="Index name (optional)" /></td>
+                  <td className="px-1 py-1">
+                    <IndexColumnPicker
+                      availableColumns={columns.filter((c) => c.name.trim()).map((c) => c.name.trim())}
+                      selected={idx.columns}
+                      onChange={(val) => updateIndex(i, 'columns', val)}
+                    />
+                  </td>
+                  <td className="px-1 py-1 text-center"><input type="checkbox" checked={idx.unique} onChange={(e) => updateIndex(i, 'unique', e.target.checked)} title="Unique" /></td>
+                  <td /><td />
+                  <td className="px-1 py-1 text-center"><button className="text-red-400 hover:text-red-600" onClick={() => removeIndex(i)} type="button">&times;</button></td>
                 </tr>
               ))}
             </tbody>
           </table>
+          </div>
+
+          <div className="overflow-hidden rounded-lg border border-black/10">
+            <div className="px-3 py-1.5 text-[12px] font-semibold text-black">SQL Preview</div>
+            <pre className="overflow-x-auto border-t border-black/10 bg-gray-50 p-3 font-mono text-[11px] leading-relaxed text-black">{buildSqlPreview()}</pre>
+          </div>
         </div>
         <div className="flex items-center justify-end gap-2 border-t border-black/5 px-5 py-3">
           <button className="rounded-lg border border-black/10 px-4 py-1.5 text-[12px] text-gray-500 hover:text-black" onClick={onClose} type="button">Cancel</button>
@@ -2964,6 +3118,7 @@ function BackupTable({ entries, onDelete, onRestore }: {
   );
 }
 
+const COMMON_TYPES = ['serial', 'bigserial', 'integer', 'bigint', 'smallint', 'text', 'varchar(255)', 'boolean', 'timestamp', 'timestamptz', 'date', 'numeric', 'real', 'double precision', 'uuid', 'jsonb', 'json', 'bytea'];
 const ALL_DAYS = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'] as const;
 const DAY_LABELS: Record<string, string> = { sunday: 'Sun', monday: 'Mon', tuesday: 'Tue', wednesday: 'Wed', thursday: 'Thu', friday: 'Fri', saturday: 'Sat' };
 
@@ -3732,7 +3887,7 @@ function TableTreeNode({ schema, table, onPreview, onContextMenu }: { schema: st
           <button className="flex w-full items-center gap-1 py-0.5 text-left text-[11px] text-gray-500 hover:text-black" onClick={() => toggleSection('columns')} type="button">
             <span className="w-3 text-center text-[9px] text-gray-400">{openSections.columns ? '\u25BE' : '\u25B8'}</span>
             <span>Columns</span>
-            <span className="text-gray-400">({table.columns.length})</span>
+            <span className="text-gray-400">({(table.columns ?? []).length})</span>
           </button>
           {openSections.columns ? (
             <div className="pl-4">
@@ -3751,16 +3906,16 @@ function TableTreeNode({ schema, table, onPreview, onContextMenu }: { schema: st
           <button className="flex w-full items-center gap-1 py-0.5 text-left text-[11px] text-gray-500 hover:text-black" onClick={() => toggleSection('keys')} type="button">
             <span className="w-3 text-center text-[9px] text-gray-400">{openSections.keys ? '\u25BE' : '\u25B8'}</span>
             <span>Keys</span>
-            <span className="text-gray-400">({table.keys.length})</span>
+            <span className="text-gray-400">({(table.keys ?? []).length})</span>
           </button>
           {openSections.keys ? (
             <div className="pl-4">
-              {table.keys.length > 0 ? table.keys.map((k) => (
+              {(table.keys ?? []).length > 0 ? (table.keys ?? []).map((k) => (
                 <div key={k.name} className="flex items-center gap-2 py-[1px] text-[11px]">
                   <span className={k.type === 'PRIMARY KEY' ? 'text-amber-500' : k.type === 'FOREIGN KEY' ? 'text-blue-500' : 'text-gray-400'}>&#9670;</span>
                   <span className="text-black">{k.name}</span>
-                  <span className="text-gray-400">{k.columns.join(', ')}</span>
-                  {k.referencedTable && <span className="text-[9px] text-blue-400">&rarr; {k.referencedTable}</span>}
+                  <span className="text-gray-400">{Array.isArray(k.columns) ? k.columns.join(', ') : String(k.columns ?? '')}</span>
+                  {k.referencedTable ? <span className="text-[9px] text-blue-400">&rarr; {k.referencedTable}</span> : null}
                 </div>
               )) : (
                 <div className="py-[1px] text-[11px] text-gray-400">None</div>
@@ -3772,7 +3927,7 @@ function TableTreeNode({ schema, table, onPreview, onContextMenu }: { schema: st
           <button className="flex w-full items-center gap-1 py-0.5 text-left text-[11px] text-gray-500 hover:text-black" onClick={() => toggleSection('indexes')} type="button">
             <span className="w-3 text-center text-[9px] text-gray-400">{openSections.indexes ? '\u25BE' : '\u25B8'}</span>
             <span>Indexes</span>
-            <span className="text-gray-400">({table.indexes.length})</span>
+            <span className="text-gray-400">({(table.indexes ?? []).length})</span>
           </button>
           {openSections.indexes ? (
             <div className="pl-4">
@@ -3780,7 +3935,7 @@ function TableTreeNode({ schema, table, onPreview, onContextMenu }: { schema: st
                 <div key={idx.name} className="flex items-center gap-2 py-[1px] text-[11px]">
                   <span className="text-gray-400">&#9656;</span>
                   <span className="text-black">{idx.name}</span>
-                  <span className="text-gray-400">{idx.columns.join(', ')}</span>
+                  <span className="text-gray-400">{Array.isArray(idx.columns) ? idx.columns.join(', ') : String(idx.columns ?? '')}</span>
                   {idx.isUnique && <span className="text-[9px] text-amber-500">UQ</span>}
                 </div>
               )) : (

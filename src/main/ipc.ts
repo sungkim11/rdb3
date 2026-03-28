@@ -1,6 +1,6 @@
 import { app, ipcMain, dialog, BrowserWindow } from 'electron';
 import { appState } from './state';
-import { loadConnections, saveConnections } from './storage';
+import { loadConnections, saveConnections, saveLastConnectionId, loadLastConnectionId } from './storage';
 import * as postgres from './postgres';
 import { closeAllPools } from './postgres';
 import { closeAllTunnels } from './ssh-tunnel';
@@ -69,6 +69,25 @@ async function snapshotWithTree(): Promise<AppSnapshot> {
 
 export function registerIpcHandlers(): void {
   ipcMain.handle('bootstrap', async () => {
+    // Auto-connect to last used database on startup
+    if (!appState.activeConnection) {
+      const lastId = loadLastConnectionId();
+      console.log('[bootstrap] last connection id:', lastId);
+      if (lastId) {
+        const saved = loadConnections();
+        const conn = saved.find((c) => c.id === lastId);
+        console.log('[bootstrap] found connection:', conn ? `${conn.database}@${conn.host}` : 'not found');
+        if (conn) {
+          try {
+            await postgres.testConnection(conn);
+            appState.activeConnection = conn;
+            console.log('[bootstrap] auto-connected successfully');
+          } catch (err) {
+            console.log('[bootstrap] auto-connect failed:', err instanceof Error ? err.message : err);
+          }
+        }
+      }
+    }
     return snapshotWithTree();
   });
 
@@ -119,6 +138,7 @@ export function registerIpcHandlers(): void {
     }
 
     appState.activeConnection = saved;
+    saveLastConnectionId(saved.id);
     return snapshotWithTree();
   });
 
@@ -129,6 +149,7 @@ export function registerIpcHandlers(): void {
 
     await postgres.testConnection(conn);
     appState.activeConnection = conn;
+    saveLastConnectionId(conn.id);
     return snapshotWithTree();
   });
 
@@ -204,15 +225,20 @@ export function registerIpcHandlers(): void {
     return postgres.exportTableCsv(appState.activeConnection, schema, table, path);
   });
 
+  ipcMain.handle('export-table-parquet', async (_event, schema: string, table: string, path: string) => {
+    if (!appState.activeConnection) throw new Error('No active database connection');
+    return postgres.exportTableParquet(appState.activeConnection, schema, table, path);
+  });
+
   ipcMain.handle('create-schema', async (_event, schemaName: string) => {
     if (!appState.activeConnection) throw new Error('No active database connection');
     await postgres.createSchema(appState.activeConnection, schemaName);
     return snapshotWithTree();
   });
 
-  ipcMain.handle('create-table', async (_event, schema: string, tableName: string, columns: Array<{ name: string; type: string; nullable: boolean; defaultValue?: string }>) => {
+  ipcMain.handle('create-table', async (_event, schema: string, tableName: string, columns: Array<{ name: string; type: string; nullable: boolean; defaultValue?: string; pk?: boolean }>, foreignKeys?: Array<{ column: string; refTable: string; refColumn: string }>, indexes?: Array<{ name?: string; columns: string; unique?: boolean }>) => {
     if (!appState.activeConnection) throw new Error('No active database connection');
-    await postgres.createTable(appState.activeConnection, schema, tableName, columns);
+    await postgres.createTable(appState.activeConnection, schema, tableName, columns, foreignKeys, indexes);
     return snapshotWithTree();
   });
 
