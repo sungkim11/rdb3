@@ -1,8 +1,9 @@
-import type { ActiveQuery, AlterTableAction, AppInfo, AppSnapshot, BackupEntry, BackupOptions, BackupSchedule, ConnectionInput, DdlResult, DmlOperation, EditableTableData, FileEntry, GitRepo, GitStatus, HostStats, ModifyTableInfo, PgpassEntry, QueryResult } from './types';
+import type { ActiveQuery, AlterTableAction, AppInfo, AppSnapshot, BackupEntry, BackupOptions, BackupSchedule, ConnectionInput, DdlResult, DmlOperation, EditableTableData, FileEntry, GitRepo, GitStatus, HostStats, ModifyTableInfo, MonitoringData, PgpassEntry, QueryResult } from './types';
 
 interface ElectronAPI {
   bootstrap(): Promise<AppSnapshot>;
   hostStats(): Promise<HostStats>;
+  monitoringData(): Promise<MonitoringData>;
   activeQueries(): Promise<ActiveQuery[]>;
   testConnection(connection: ConnectionInput): Promise<{ success: boolean }>;
   connect(connection: ConnectionInput, save: boolean): Promise<AppSnapshot>;

@@ -76,6 +76,11 @@ export function registerIpcHandlers(): void {
     return postgres.getHostStats(appState.activeConnection);
   });
 
+  ipcMain.handle('monitoring-data', async () => {
+    if (!appState.activeConnection) throw new Error('No active database connection');
+    return postgres.getMonitoringData(appState.activeConnection);
+  });
+
   ipcMain.handle('active-queries', async () => {
     if (!appState.activeConnection) throw new Error('No active database connection');
     return postgres.getActiveQueries(appState.activeConnection);

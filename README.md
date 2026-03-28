@@ -53,6 +53,20 @@ PostGrip is a fast, lightweight desktop client for PostgreSQL. Browse schemas, w
 - Server uptime, database size, active connections
 - Active query list from PostgreSQL activity views
 
+### Monitoring
+A dedicated full-pane monitoring view (click **Monitoring** in the menu bar) with comprehensive PostgreSQL server metrics:
+
+- **Server Overview** — 9 graphical metric cards with sparkline graphs:
+  - CPU, RAM, Cache Hit Ratio, TPS, Connection Saturation, Uptime, DB Size, Deadlocks, Temp Files
+- **Checkpoints & Buffers** — timed vs requested checkpoints, buffer writes by checkpoint/bgwriter/backend
+- **Connections** — breakdown by state (active, idle, idle in transaction) and by user
+- **Locks** — current locks by type and mode, blocked queries with wait duration
+- **Long Running Transactions** — queries running for more than 1 minute
+- **Query History** — recent queries from the current session
+- **Table Statistics** — top 50 tables by activity: sequential/index scans, rows inserted/updated/deleted, dead tuples, table size, last vacuum
+- **Unused Indexes** — indexes with zero scans, sorted by size
+- **Replication** — replica lag monitoring (write, flush, replay lag)
+
 ### Table Operations (right-click context menu)
 - **Show DDL** — view the `CREATE TABLE` statement
 - **Edit Data** — inline-editable data grid with cell editing, row add/delete, NULL handling, and pending change tracking

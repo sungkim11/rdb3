@@ -577,4 +577,82 @@ describe('postgres', () => {
       expect(() => postgres.closeAllPools()).not.toThrow();
     });
   });
+
+  describe('executeSql', () => {
+    it('executes SQL and releases client', async () => {
+      await postgres.executeSql(conn, 'CREATE TABLE test (id int)');
+      expect(queries.some((q) => q.sql === 'CREATE TABLE test (id int)')).toBe(true);
+      expect(mockClient.release).toHaveBeenCalled();
+    });
+
+    it('releases client on error', async () => {
+      mockClient.query.mockRejectedValueOnce(new Error('syntax error'));
+      await expect(postgres.executeSql(conn, 'INVALID SQL')).rejects.toThrow('syntax error');
+      expect(mockClient.release).toHaveBeenCalled();
+    });
+  });
+
+  describe('getMonitoringData', () => {
+    it('returns monitoring data structure', async () => {
+      const data = await postgres.getMonitoringData(conn);
+      expect(data).toHaveProperty('connectionsByState');
+      expect(data).toHaveProperty('connectionsByUser');
+      expect(data).toHaveProperty('tableStats');
+      expect(data).toHaveProperty('unusedIndexes');
+      expect(data).toHaveProperty('locksByType');
+      expect(data).toHaveProperty('blockedQueries');
+      expect(data).toHaveProperty('deadlocks');
+      expect(data).toHaveProperty('tempFiles');
+      expect(data).toHaveProperty('tempBytes');
+      expect(data).toHaveProperty('conflictsCount');
+      expect(data).toHaveProperty('checkpointsTimed');
+      expect(data).toHaveProperty('checkpointsReq');
+      expect(data).toHaveProperty('buffersCheckpoint');
+      expect(data).toHaveProperty('buffersBgwriter');
+      expect(data).toHaveProperty('buffersBackend');
+      expect(data).toHaveProperty('replicationLag');
+      expect(data).toHaveProperty('longRunningTxns');
+      expect(mockClient.release).toHaveBeenCalled();
+    });
+
+    it('parses connection breakdown', async () => {
+      queryResponses.set('pg_stat_activity GROUP BY state', {
+        rows: [{ state: 'active', count: 5 }, { state: 'idle', count: 10 }],
+      });
+      const data = await postgres.getMonitoringData(conn);
+      expect(data.connectionsByState).toHaveLength(2);
+      expect(data.connectionsByState[0]).toEqual({ state: 'active', count: 5 });
+    });
+
+    it('parses database stats', async () => {
+      queryResponses.set('deadlocks', {
+        rows: [{ deadlocks: 3, temp_files: 12, temp_bytes: 1048576, conflicts: 0 }],
+      });
+      const data = await postgres.getMonitoringData(conn);
+      expect(data.deadlocks).toBe(3);
+      expect(data.tempFiles).toBe(12);
+      expect(data.tempBytes).toBe(1048576);
+    });
+
+    it('parses checkpoint stats', async () => {
+      queryResponses.set('pg_stat_bgwriter', {
+        rows: [{ checkpoints_timed: 100, checkpoints_req: 5, buffers_checkpoint: 500, buffers_clean: 200, buffers_backend: 50 }],
+      });
+      const data = await postgres.getMonitoringData(conn);
+      expect(data.checkpointsTimed).toBe(100);
+      expect(data.checkpointsReq).toBe(5);
+      expect(data.buffersCheckpoint).toBe(500);
+      expect(data.buffersBgwriter).toBe(200);
+      expect(data.buffersBackend).toBe(50);
+    });
+
+    it('returns empty arrays when queries fail', async () => {
+      mockClient.query.mockRejectedValue(new Error('permission denied'));
+      // Should not throw — individual queries fail silently
+      const data = await postgres.getMonitoringData(conn);
+      expect(data.connectionsByState).toEqual([]);
+      expect(data.tableStats).toEqual([]);
+      expect(data.locksByType).toEqual([]);
+    });
+  });
 });

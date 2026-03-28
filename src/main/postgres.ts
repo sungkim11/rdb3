@@ -141,7 +141,7 @@ export async function getHostStats(conn: SavedConnection): Promise<HostStats> {
           (SELECT count(*)::int FROM pg_stat_activity) AS active,
           (SELECT setting::int FROM pg_settings WHERE name = 'max_connections') AS max_conn,
           (SELECT xact_commit + xact_rollback FROM pg_stat_database WHERE datname = current_database()) AS txn,
-          now() - pg_postmaster_start_time() AS uptime,
+          (now() - pg_postmaster_start_time())::text AS uptime,
           (SELECT CASE WHEN blks_hit + blks_read = 0 THEN 0
                   ELSE round(100.0 * blks_hit / (blks_hit + blks_read), 1) END
            FROM pg_stat_database WHERE datname = current_database()) AS cache_ratio
@@ -248,6 +248,183 @@ export async function getActiveQueries(conn: SavedConnection): Promise<ActiveQue
       query: r.query as string,
       durationMs: Math.round(r.duration_ms as number),
     }));
+  } finally {
+    client.release();
+  }
+}
+
+export interface MonitoringData {
+  // Connections breakdown
+  connectionsByState: Array<{ state: string; count: number }>;
+  connectionsByUser: Array<{ user: string; count: number }>;
+  // Table stats
+  tableStats: Array<{ schema: string; table: string; seqScan: number; idxScan: number; rowsInserted: number; rowsUpdated: number; rowsDeleted: number; deadTuples: number; lastVacuum: string | null; lastAnalyze: string | null; tableSize: string }>;
+  // Index stats
+  unusedIndexes: Array<{ schema: string; table: string; index: string; size: string }>;
+  // Locks
+  locksByType: Array<{ locktype: string; mode: string; count: number }>;
+  blockedQueries: Array<{ pid: number; query: string; waitingFor: number; durationMs: number }>;
+  // Database stats
+  deadlocks: number;
+  tempFiles: number;
+  tempBytes: number;
+  conflictsCount: number;
+  // Checkpoint/bgwriter
+  checkpointsTimed: number;
+  checkpointsReq: number;
+  buffersCheckpoint: number;
+  buffersBgwriter: number;
+  buffersBackend: number;
+  // Replication
+  replicationLag: Array<{ clientAddr: string; state: string; sentLag: string; writeLag: string; flushLag: string; replayLag: string }>;
+  // Long running
+  longRunningTxns: Array<{ pid: number; user: string; duration: string; state: string; query: string }>;
+}
+
+export async function getMonitoringData(conn: SavedConnection): Promise<MonitoringData> {
+  const client = await connect(conn);
+  try {
+    const data: MonitoringData = {
+      connectionsByState: [], connectionsByUser: [],
+      tableStats: [], unusedIndexes: [],
+      locksByType: [], blockedQueries: [],
+      deadlocks: 0, tempFiles: 0, tempBytes: 0, conflictsCount: 0,
+      checkpointsTimed: 0, checkpointsReq: 0, buffersCheckpoint: 0, buffersBgwriter: 0, buffersBackend: 0,
+      replicationLag: [], longRunningTxns: [],
+    };
+
+    // Connections by state
+    try {
+      const r = await client.query(`SELECT COALESCE(state, 'unknown') AS state, count(*)::int AS count FROM pg_stat_activity GROUP BY state ORDER BY count DESC`);
+      data.connectionsByState = r.rows.map((row: Record<string, unknown>) => ({ state: row.state as string, count: row.count as number }));
+    } catch {}
+
+    // Connections by user
+    try {
+      const r = await client.query(`SELECT usename AS user, count(*)::int AS count FROM pg_stat_activity WHERE usename IS NOT NULL GROUP BY usename ORDER BY count DESC`);
+      data.connectionsByUser = r.rows.map((row: Record<string, unknown>) => ({ user: row.user as string, count: row.count as number }));
+    } catch {}
+
+    // Table stats (top 50 by total activity)
+    try {
+      const r = await client.query(`
+        SELECT schemaname AS schema, relname AS table,
+          seq_scan::int, idx_scan::int,
+          n_tup_ins::int AS rows_inserted, n_tup_upd::int AS rows_updated, n_tup_del::int AS rows_deleted,
+          n_dead_tup::int AS dead_tuples,
+          last_vacuum::text, last_analyze::text,
+          pg_size_pretty(pg_total_relation_size(schemaname || '.' || relname)) AS table_size
+        FROM pg_stat_user_tables
+        ORDER BY (seq_scan + idx_scan + n_tup_ins + n_tup_upd + n_tup_del) DESC
+        LIMIT 50
+      `);
+      data.tableStats = r.rows.map((row: Record<string, unknown>) => ({
+        schema: row.schema as string, table: row.table as string,
+        seqScan: row.seq_scan as number, idxScan: row.idx_scan as number,
+        rowsInserted: row.rows_inserted as number, rowsUpdated: row.rows_updated as number, rowsDeleted: row.rows_deleted as number,
+        deadTuples: row.dead_tuples as number,
+        lastVacuum: row.last_vacuum as string | null, lastAnalyze: row.last_analyze as string | null,
+        tableSize: row.table_size as string,
+      }));
+    } catch {}
+
+    // Unused indexes
+    try {
+      const r = await client.query(`
+        SELECT schemaname AS schema, relname AS table, indexrelname AS index,
+          pg_size_pretty(pg_relation_size(indexrelid)) AS size
+        FROM pg_stat_user_indexes
+        WHERE idx_scan = 0 AND schemaname NOT IN ('pg_catalog','information_schema')
+        ORDER BY pg_relation_size(indexrelid) DESC
+        LIMIT 20
+      `);
+      data.unusedIndexes = r.rows.map((row: Record<string, unknown>) => ({
+        schema: row.schema as string, table: row.table as string,
+        index: row.index as string, size: row.size as string,
+      }));
+    } catch {}
+
+    // Locks by type
+    try {
+      const r = await client.query(`SELECT locktype, mode, count(*)::int AS count FROM pg_locks GROUP BY locktype, mode ORDER BY count DESC LIMIT 20`);
+      data.locksByType = r.rows.map((row: Record<string, unknown>) => ({ locktype: row.locktype as string, mode: row.mode as string, count: row.count as number }));
+    } catch {}
+
+    // Blocked queries
+    try {
+      const r = await client.query(`
+        SELECT blocked.pid, blocked.query, blocking.pid AS waiting_for,
+          EXTRACT(EPOCH FROM (now() - blocked.query_start))::float * 1000 AS duration_ms
+        FROM pg_locks bl JOIN pg_stat_activity blocked ON bl.pid = blocked.pid
+        JOIN pg_locks kl ON bl.locktype = kl.locktype AND bl.database IS NOT DISTINCT FROM kl.database
+          AND bl.relation IS NOT DISTINCT FROM kl.relation AND bl.page IS NOT DISTINCT FROM kl.page
+          AND bl.tuple IS NOT DISTINCT FROM kl.tuple AND bl.virtualxid IS NOT DISTINCT FROM kl.virtualxid
+          AND bl.transactionid IS NOT DISTINCT FROM kl.transactionid AND bl.classid IS NOT DISTINCT FROM kl.classid
+          AND bl.objid IS NOT DISTINCT FROM kl.objid AND bl.objsubid IS NOT DISTINCT FROM kl.objsubid AND bl.pid != kl.pid
+        JOIN pg_stat_activity blocking ON kl.pid = blocking.pid
+        WHERE NOT bl.granted LIMIT 10
+      `);
+      data.blockedQueries = r.rows.map((row: Record<string, unknown>) => ({
+        pid: row.pid as number, query: row.query as string,
+        waitingFor: row.waiting_for as number, durationMs: Math.round(row.duration_ms as number),
+      }));
+    } catch {}
+
+    // Database stats
+    try {
+      const r = await client.query(`SELECT deadlocks::int, temp_files::int, temp_bytes::bigint, conflicts::int FROM pg_stat_database WHERE datname = current_database()`);
+      if (r.rows.length) {
+        data.deadlocks = r.rows[0].deadlocks as number;
+        data.tempFiles = r.rows[0].temp_files as number;
+        data.tempBytes = Number(r.rows[0].temp_bytes);
+        data.conflictsCount = r.rows[0].conflicts as number;
+      }
+    } catch {}
+
+    // Checkpoint/bgwriter
+    try {
+      const r = await client.query(`SELECT checkpoints_timed::int, checkpoints_req::int, buffers_checkpoint::int, buffers_clean::int, buffers_backend::int FROM pg_stat_bgwriter`);
+      if (r.rows.length) {
+        data.checkpointsTimed = r.rows[0].checkpoints_timed as number;
+        data.checkpointsReq = r.rows[0].checkpoints_req as number;
+        data.buffersCheckpoint = r.rows[0].buffers_checkpoint as number;
+        data.buffersBgwriter = r.rows[0].buffers_clean as number;
+        data.buffersBackend = r.rows[0].buffers_backend as number;
+      }
+    } catch {}
+
+    // Replication lag
+    try {
+      const r = await client.query(`
+        SELECT client_addr::text, state,
+          COALESCE(sent_lsn - write_lsn, '0/0')::text AS sent_lag,
+          COALESCE(write_lag::text, '--') AS write_lag,
+          COALESCE(flush_lag::text, '--') AS flush_lag,
+          COALESCE(replay_lag::text, '--') AS replay_lag
+        FROM pg_stat_replication
+      `);
+      data.replicationLag = r.rows.map((row: Record<string, unknown>) => ({
+        clientAddr: row.client_addr as string, state: row.state as string,
+        sentLag: row.sent_lag as string, writeLag: row.write_lag as string,
+        flushLag: row.flush_lag as string, replayLag: row.replay_lag as string,
+      }));
+    } catch {}
+
+    // Long running transactions (>1 min)
+    try {
+      const r = await client.query(`
+        SELECT pid, usename AS user, (now() - xact_start)::text AS duration, state, query
+        FROM pg_stat_activity
+        WHERE xact_start IS NOT NULL AND state != 'idle' AND (now() - xact_start) > interval '1 minute'
+        ORDER BY xact_start ASC LIMIT 20
+      `);
+      data.longRunningTxns = r.rows.map((row: Record<string, unknown>) => ({
+        pid: row.pid as number, user: row.user as string,
+        duration: row.duration as string, state: row.state as string, query: row.query as string,
+      }));
+    } catch {}
+
+    return data;
   } finally {
     client.release();
   }

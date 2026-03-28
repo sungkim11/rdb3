@@ -141,6 +141,129 @@ Metrics update every 10 seconds and display sparkline graphs for trend visualiza
 
 ---
 
+## Monitoring
+
+Click **Monitoring** in the menu bar to open the full monitoring panel. This provides comprehensive PostgreSQL server metrics in a dedicated view.
+
+### Server Overview
+
+Nine graphical metric cards with sparkline graphs:
+
+- **Server CPU** -- CPU utilization percentage
+- **Server RAM** -- memory usage with MB breakdown
+- **Cache Hit** -- buffer cache hit ratio
+- **TXN Throughput** -- transactions per second
+- **Conn Saturation** -- active connections vs max
+- **Uptime** -- server uptime in days/hours/minutes
+- **DB Size** -- database size in GB/MB
+- **Deadlocks** -- total deadlock count (highlights red if > 0)
+- **Temp Files** -- temporary file count and total size
+
+### Checkpoints & Buffers
+
+Five stat cards showing:
+
+- Timed checkpoints and requested checkpoints
+- Buffers written by checkpoint, background writer, and backend processes
+
+### Connections
+
+Two tables showing connection breakdown:
+
+- **By State** -- active, idle, idle in transaction, etc.
+- **By User** -- connection count per database user
+
+### Locks
+
+- **By Type** -- current locks grouped by lock type and mode
+- **Blocked Queries** -- queries waiting on locks with PID, blocking PID, wait duration, and query text
+
+### Long Running Transactions
+
+Lists all transactions running for more than 1 minute with PID, user, duration, state, and query.
+
+### Query History
+
+Recent queries from the current session with their results.
+
+### Table Statistics
+
+Top 50 tables sorted by activity:
+
+| Column | Description |
+|--------|-------------|
+| Seq Scan | Number of sequential scans |
+| Idx Scan | Number of index scans |
+| Ins/Upd/Del | Rows inserted, updated, deleted |
+| Dead | Dead tuples (candidates for vacuum) |
+| Size | Total table size |
+| Last Vacuum | When the table was last vacuumed |
+
+### Unused Indexes
+
+Indexes with zero scans, sorted by size. These are candidates for removal to save disk space and improve write performance.
+
+### Replication
+
+If the server has replicas, shows replication status including write lag, flush lag, and replay lag per client.
+
+Click **Refresh** to reload all metrics, or **Close** to return to the Data pane.
+
+---
+
+## Backup & Restore
+
+Click **Backup & Restore** in the menu bar to open the backup panel.
+
+### Backup Now
+
+Click **Backup Now** to open the backup configuration modal:
+
+- **Format** -- Tar Archive, Custom (pg_restore compatible), Plain SQL, or Directory
+- **Scope** -- Back up the entire database, or select specific schemas and tables using a tree view with checkboxes
+- **Content** -- Schema + Data, Schema Only, or Data Only
+- **Options** -- No owner, no privileges, clean (DROP before CREATE), CREATE DATABASE, IF EXISTS
+- **Compression** -- Level 0-9 (available for Custom and Directory formats)
+- **Output File** -- Editable path with Browse button
+
+During backup, an animated progress bar shows in the toolbar and the backup appears in the history table with "In Progress" status.
+
+### Schedule Backup
+
+Click **Schedule Backup** to set up recurring automated backups:
+
+- **Days** -- Select which days of the week to run (Sunday through Saturday)
+- **Start Time** -- Pick the time to start the backup
+- **Format, Scope, Content, Options** -- Same options as Backup Now
+
+Scheduled backups only run while PostGrip is open with an active database connection. The Backup Schedules table shows all schedules with their run days, start time, and last run timestamp.
+
+### Backup History
+
+The backup history table shows all backups with:
+
+- **Created Date** -- when the backup was created
+- **Status** -- In Progress, Successful, or Failed
+- **Size** -- file size
+- **Duration** -- how long the backup took
+- **Path** -- full file path
+- **Actions** -- Delete and Restore buttons
+
+Click any row to expand it and see full backup details: format, scope, content, options, schemas, and tables.
+
+### Restoring a Backup
+
+Click **Restore** next to any backup in the history:
+
+- `.sql` files are executed directly as SQL
+- `.dump` and `.tar` files are restored via `pg_restore`
+
+### Backup Directory
+
+The default backup directory is `~/PostGrip_Backups`. Click **Change** to select a different directory. The preference persists across sessions.
+
+---
+
 ## File Explorer
 
 The **Files** tab in the Explorer panel lets you browse your local filesystem:

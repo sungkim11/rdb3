@@ -3,6 +3,7 @@ import { contextBridge, ipcRenderer } from 'electron';
 contextBridge.exposeInMainWorld('electronAPI', {
   bootstrap: () => ipcRenderer.invoke('bootstrap'),
   hostStats: () => ipcRenderer.invoke('host-stats'),
+  monitoringData: () => ipcRenderer.invoke('monitoring-data'),
   activeQueries: () => ipcRenderer.invoke('active-queries'),
   testConnection: (connection: unknown) =>
     ipcRenderer.invoke('test-connection', connection),

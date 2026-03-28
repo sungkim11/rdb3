@@ -10,6 +10,7 @@ import type {
   BackupEntry,
   BackupOptions,
   BackupSchedule,
+  MonitoringData,
   ConnectionInput,
   DdlResult,
   DmlOperation,
@@ -188,6 +189,8 @@ export function AppShell() {
   const [testStatus, setTestStatus] = useState<'idle' | 'testing' | 'success' | 'fail'>('idle');
   const [connectionTab, setConnectionTab] = useState<'general' | 'ssh'>('general');
   const [testError, setTestError] = useState('');
+  const [showMonitoringPanel, setShowMonitoringPanel] = useState(false);
+  const [monitoringData, setMonitoringData] = useState<MonitoringData | null>(null);
   const [showBackupPanel, setShowBackupPanel] = useState(false);
   const [showBackupModal, setShowBackupModal] = useState(false);
   const [runningBackup, setRunningBackup] = useState<{ name: string; startTime: number } | null>(null);
@@ -254,6 +257,8 @@ export function AppShell() {
 
   function openSqlEditor() {
     setShowSqlEditor(true);
+    setShowMonitoringPanel(false);
+    setShowBackupPanel(false);
     if (sqlTabs.length === 0) addSqlTab();
   }
 
@@ -530,9 +535,29 @@ export function AppShell() {
     return merged;
   }
 
+  async function openMonitoringPanel() {
+    if (showMonitoringPanel) { setShowMonitoringPanel(false); return; }
+    setShowMonitoringPanel(true);
+    setShowBackupPanel(false);
+    if (!snapshot?.activeConnection) return;
+    try {
+      const data = await api.monitoringData();
+      setMonitoringData(data);
+    } catch { /* ignore */ }
+  }
+
+  async function refreshMonitoring() {
+    if (!snapshot?.activeConnection) return;
+    try {
+      const data = await api.monitoringData();
+      setMonitoringData(data);
+    } catch { /* ignore */ }
+  }
+
   async function openBackupPanel() {
     if (showBackupPanel) { setShowBackupPanel(false); return; }
     setShowBackupPanel(true);
+    setShowMonitoringPanel(false);
     try {
       const dir = await api.getBackupDir();
       setBackupDir(dir);
@@ -1508,6 +1533,7 @@ export function AppShell() {
                   <MenuItem label="Exit" onClick={() => void handleExit()} />
                 </DropdownMenu>
                 <MenuButton active={false} label="SQL Editor" onClick={() => { openSqlEditor(); setOpenMenu(null); }} />
+                <MenuButton active={showMonitoringPanel} label="Monitoring" onClick={() => { void openMonitoringPanel(); setOpenMenu(null); }} />
                 <MenuButton active={showBackupPanel} label="Backup & Restore" onClick={() => { void openBackupPanel(); setOpenMenu(null); }} />
                 <DropdownMenu label="Help" active={openMenu === 'help'} onToggle={() => setOpenMenu((c) => c === 'help' ? null : 'help')}>
                   <MenuItem label="Help" onClick={() => void openHelpViewer()} />
@@ -1704,9 +1730,9 @@ export function AppShell() {
               </div>
             </div>
 
-            <div className="h-px shrink-0 cursor-row-resize bg-black/10 hover:bg-[var(--accent)]" />
+            {!showBackupPanel && !showMonitoringPanel ? <div className="h-px shrink-0 cursor-row-resize bg-black/10 hover:bg-[var(--accent)]" /> : null}
 
-            {showSqlEditor ? (
+            {showSqlEditor && !showBackupPanel && !showMonitoringPanel ? (
               <div className="glass-panel flex h-[38%] shrink-0 flex-col overflow-hidden rounded-xl">
                 <div className="flex h-7 items-center justify-between border-b border-black/5 px-3">
                   <div className="text-[13px] font-medium text-black">SQL Editor</div>
@@ -1766,6 +1792,24 @@ export function AppShell() {
                       </button>
                     ))}
                   </div>
+                </div>
+              </div>
+            ) : null}
+
+            {showMonitoringPanel ? (
+              <div className="glass-panel flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl">
+                <div className="flex h-7 items-center justify-between border-b border-black/5 px-3">
+                  <div className="text-[13px] font-medium text-black">Monitoring</div>
+                  <div className="flex items-center gap-2">
+                    <button className="px-1 py-0.5 text-[12px] leading-tight text-gray-500 hover:text-black" onClick={() => void refreshMonitoring()} type="button">Refresh</button>
+                    <button className="px-1 py-0.5 text-[12px] leading-tight text-gray-500 hover:text-black" onClick={() => setShowMonitoringPanel(false)} type="button">Close</button>
+                  </div>
+                </div>
+                <div className="min-h-0 flex-1 overflow-y-auto rounded-b-xl bg-white">
+                  <MonitoringPanel hostStats={hostStats} monitoringData={monitoringData} activeQueries={null}
+                    cpuHistory={cpuHistory} ramHistory={ramHistory} tpsHistory={tpsHistory}
+                    saturationHistory={saturationHistory} cacheHitHistory={cacheHitHistory}
+                    queryHistory={queryHistory} />
                 </div>
               </div>
             ) : null}
@@ -1850,7 +1894,7 @@ export function AppShell() {
               </div>
             ) : null}
 
-            {!showBackupPanel ? (
+            {!showBackupPanel && !showMonitoringPanel ? (
             <div className="glass-panel flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl">
               <div className="flex h-7 items-center justify-between border-b border-black/5 px-3">
                 <div className="text-[13px] font-medium text-black">
@@ -2735,6 +2779,128 @@ function BackupTable({ entries, onDelete, onRestore }: {
 const ALL_DAYS = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'] as const;
 const DAY_LABELS: Record<string, string> = { sunday: 'Sun', monday: 'Mon', tuesday: 'Tue', wednesday: 'Wed', thursday: 'Thu', friday: 'Fri', saturday: 'Sat' };
 
+function MonitoringSection({ title, children }: PropsWithChildren<{ title: string }>) {
+  return (
+    <div className="mb-4 rounded-lg border border-black/8 overflow-hidden">
+      <div className="bg-gray-50 px-3 py-1.5 text-[13px] font-semibold text-black border-b border-black/5">{title}</div>
+      <div className="p-3">{children}</div>
+    </div>
+  );
+}
+
+function MonitoringMiniTable({ headers, rows }: { headers: string[]; rows: (string | number)[][] }) {
+  return (
+    <table className="min-w-full border-collapse text-[12px]">
+      <thead><tr>{headers.map((h) => <th key={h} className="border-b border-black/8 px-3 py-1 text-left font-medium text-black">{h}</th>)}</tr></thead>
+      <tbody>
+        {rows.length === 0 ? <tr><td colSpan={headers.length} className="px-3 py-2 text-gray-400">None</td></tr> : null}
+        {rows.map((row, i) => (
+          <tr key={i} className="border-b border-black/5 hover:bg-gray-50">
+            {row.map((cell, j) => <td key={j} className="px-3 py-1 text-black">{cell}</td>)}
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
+
+function MonitoringPanel({ hostStats, monitoringData, cpuHistory, ramHistory, tpsHistory, saturationHistory, cacheHitHistory, queryHistory }: {
+  hostStats: HostStats | null;
+  monitoringData: MonitoringData | null;
+  activeQueries: null;
+  cpuHistory: number[];
+  ramHistory: number[];
+  tpsHistory: number[];
+  saturationHistory: number[];
+  cacheHitHistory: number[];
+  queryHistory: QueryHistoryEntry[];
+}) {
+  if (!hostStats && !monitoringData) return <div className="flex h-full items-center justify-center text-[12px] text-gray-400">Connect to a database to view monitoring data</div>;
+
+  return (
+    <div className="p-4">
+      <MonitoringSection title="Server Overview">
+        <div className="flex flex-wrap gap-2">
+          <DashboardGraphCard label={"Server\nCPU"} value={hostStats?.cpuUsagePercent != null ? `${hostStats.cpuUsagePercent}%` : '--'} data={cpuHistory} max={100} color="#3b82f6" warnColor="#ef4444" warn={hostStats?.cpuUsagePercent != null && hostStats.cpuUsagePercent > 80} />
+          <DashboardGraphCard label={"Server\nRAM"} value={hostStats?.memUsagePercent != null ? `${hostStats.memUsagePercent}%` : '--'} subtitle={hostStats?.memUsedMb != null ? `${hostStats.memUsedMb}/${hostStats.memTotalMb} MB` : undefined} data={ramHistory} max={100} color="#8b5cf6" warnColor="#ef4444" warn={hostStats?.memUsagePercent != null && hostStats.memUsagePercent > 80} />
+          <DashboardGraphCard label={"Cache\nHit"} value={hostStats?.cacheHitRatio != null ? `${hostStats.cacheHitRatio}%` : '--'} data={cacheHitHistory} max={100} color="#06b6d4" />
+          <DashboardGraphCard label="TXN Throughput" value={hostStats?.tps != null ? `${hostStats.tps} tps` : '--'} data={tpsHistory} color="#f59e0b" />
+          <DashboardGraphCard label="Conn Saturation" value={hostStats?.connectionSaturationPercent != null ? `${hostStats.connectionSaturationPercent}%` : '--'} subtitle={hostStats?.activeConnections != null ? `${hostStats.activeConnections}/${hostStats.maxConnections}` : undefined} data={saturationHistory} max={100} color="#10b981" warnColor="#ef4444" warn={hostStats?.connectionSaturationPercent != null && hostStats.connectionSaturationPercent > 80} />
+          <DashboardGraphCard label="Uptime" value={hostStats?.uptime != null ? String(hostStats.uptime).replace(/ /g, '\n') : '--'} data={[]} color="#6366f1" />
+          <DashboardGraphCard label="DB Size" value={hostStats?.dbSizeMb != null ? (hostStats.dbSizeMb >= 1024 ? `${(hostStats.dbSizeMb / 1024).toFixed(1)} GB` : `${hostStats.dbSizeMb} MB`) : '--'} data={[]} color="#ec4899" />
+          <DashboardGraphCard label="Deadlocks" value={monitoringData?.deadlocks != null ? String(monitoringData.deadlocks) : '--'} data={[]} color="#ef4444" warn={monitoringData != null && monitoringData.deadlocks > 0} warnColor="#ef4444" />
+          <DashboardGraphCard label="Temp Files" value={monitoringData?.tempFiles != null ? String(monitoringData.tempFiles) : '--'} subtitle={monitoringData?.tempBytes ? `${(monitoringData.tempBytes / 1024 / 1024).toFixed(1)} MB` : undefined} data={[]} color="#f97316" />
+        </div>
+      </MonitoringSection>
+
+      {monitoringData ? (
+        <>
+          <MonitoringSection title="Checkpoints & Buffers">
+            <div className="grid grid-cols-5 gap-3 text-[12px]">
+              <div className="rounded-lg border border-black/5 px-3 py-2"><span className="text-gray-400">Timed</span><div className="font-medium text-black">{monitoringData.checkpointsTimed}</div></div>
+              <div className="rounded-lg border border-black/5 px-3 py-2"><span className="text-gray-400">Requested</span><div className="font-medium text-black">{monitoringData.checkpointsReq}</div></div>
+              <div className="rounded-lg border border-black/5 px-3 py-2"><span className="text-gray-400">Buf Checkpoint</span><div className="font-medium text-black">{monitoringData.buffersCheckpoint}</div></div>
+              <div className="rounded-lg border border-black/5 px-3 py-2"><span className="text-gray-400">Buf BGWriter</span><div className="font-medium text-black">{monitoringData.buffersBgwriter}</div></div>
+              <div className="rounded-lg border border-black/5 px-3 py-2"><span className="text-gray-400">Buf Backend</span><div className="font-medium text-black">{monitoringData.buffersBackend}</div></div>
+            </div>
+          </MonitoringSection>
+
+          <MonitoringSection title="Connections">
+            <div className="mb-3">
+              <div className="mb-1 text-[11px] font-medium text-gray-500">By State</div>
+              <MonitoringMiniTable headers={['State', 'Count']} rows={monitoringData.connectionsByState.map((r) => [r.state, r.count])} />
+            </div>
+            <div>
+              <div className="mb-1 text-[11px] font-medium text-gray-500">By User</div>
+              <MonitoringMiniTable headers={['User', 'Count']} rows={monitoringData.connectionsByUser.map((r) => [r.user, r.count])} />
+            </div>
+          </MonitoringSection>
+
+          <MonitoringSection title="Locks">
+            <div className="mb-3">
+              <div className="mb-1 text-[11px] font-medium text-gray-500">By Type</div>
+              <MonitoringMiniTable headers={['Type', 'Mode', 'Count']} rows={monitoringData.locksByType.map((r) => [r.locktype, r.mode, r.count])} />
+            </div>
+            <div>
+              <div className="mb-1 text-[11px] font-medium text-gray-500">Blocked Queries</div>
+              <MonitoringMiniTable headers={['PID', 'Waiting For', 'Duration', 'Query']} rows={monitoringData.blockedQueries.map((r) => [r.pid, r.waitingFor, `${(r.durationMs / 1000).toFixed(1)}s`, r.query.substring(0, 60)])} />
+            </div>
+          </MonitoringSection>
+
+          {monitoringData.longRunningTxns.length > 0 ? (
+            <MonitoringSection title="Long Running Transactions (>1 min)">
+              <MonitoringMiniTable headers={['PID', 'User', 'Duration', 'State', 'Query']} rows={monitoringData.longRunningTxns.map((r) => [r.pid, r.user, r.duration.split('.')[0], r.state, r.query.substring(0, 80)])} />
+            </MonitoringSection>
+          ) : null}
+
+          <MonitoringSection title="Query History">
+            <MonitoringMiniTable headers={['Query', 'Result']} rows={queryHistory.map((e) => [e.sql.substring(0, 100), e.resultMeta])} />
+          </MonitoringSection>
+
+          <MonitoringSection title="Table Statistics (Top 50)">
+            <div className="overflow-x-auto">
+              <MonitoringMiniTable headers={['Schema', 'Table', 'Seq Scan', 'Idx Scan', 'Ins', 'Upd', 'Del', 'Dead', 'Size', 'Last Vacuum']}
+                rows={monitoringData.tableStats.map((r) => [r.schema, r.table, r.seqScan, r.idxScan, r.rowsInserted, r.rowsUpdated, r.rowsDeleted, r.deadTuples, r.tableSize, r.lastVacuum?.split('.')[0] ?? 'Never'])} />
+            </div>
+          </MonitoringSection>
+
+          {monitoringData.unusedIndexes.length > 0 ? (
+            <MonitoringSection title="Unused Indexes">
+              <MonitoringMiniTable headers={['Schema', 'Table', 'Index', 'Size']} rows={monitoringData.unusedIndexes.map((r) => [r.schema, r.table, r.index, r.size])} />
+            </MonitoringSection>
+          ) : null}
+
+          {monitoringData.replicationLag.length > 0 ? (
+            <MonitoringSection title="Replication">
+              <MonitoringMiniTable headers={['Client', 'State', 'Write Lag', 'Flush Lag', 'Replay Lag']} rows={monitoringData.replicationLag.map((r) => [r.clientAddr, r.state, r.writeLag, r.flushLag, r.replayLag])} />
+            </MonitoringSection>
+          ) : null}
+        </>
+      ) : null}
+    </div>
+  );
+}
+
 function ScheduleBackupModal({ tree, database, backupDir, existing, onClose, onSave }: {
   tree: SchemaNode[];
   database: string;
@@ -2892,9 +3058,14 @@ function ScheduleBackupModal({ tree, database, backupDir, existing, onClose, onS
           </div>
         </div>
 
-        <div className="flex items-center justify-end gap-2 border-t border-black/5 px-5 py-3">
-          <button className="rounded-lg border border-black/10 px-4 py-1.5 text-[12px] text-gray-500 hover:text-black" onClick={onClose} type="button">Cancel</button>
-          <button className="rounded-lg bg-[var(--accent)] px-4 py-1.5 text-[12px] text-white hover:opacity-90" onClick={handleSave} type="button">{existing ? 'Update Schedule' : 'Add Backup Schedule'}</button>
+        <div className="border-t border-black/5 px-5 py-3">
+          <div className="mb-2 rounded-lg bg-amber-50 px-3 py-2 text-[11px] text-amber-700">
+            Scheduled backups only run while PostGrip is open with an active database connection. If the app is closed at the scheduled time, the backup will be skipped.
+          </div>
+          <div className="flex items-center justify-end gap-2">
+            <button className="rounded-lg border border-black/10 px-4 py-1.5 text-[12px] text-gray-500 hover:text-black" onClick={onClose} type="button">Cancel</button>
+            <button className="rounded-lg bg-[var(--accent)] px-4 py-1.5 text-[12px] text-white hover:opacity-90" onClick={handleSave} type="button">{existing ? 'Update Schedule' : 'Add Backup Schedule'}</button>
+          </div>
         </div>
       </div>
     </div>
@@ -3311,7 +3482,7 @@ function DashboardGraphCard({ label, value, subtitle, data, max, color, warnColo
     <div className="flex min-w-[140px] flex-1 flex-col gap-1 rounded-lg border border-gray-200 bg-white/40 px-3 py-2">
       <div className="flex items-baseline justify-between">
         <div className="whitespace-pre-line text-[10px] font-medium uppercase leading-tight tracking-[0.08em] text-gray-500">{label}</div>
-        <div className={classNames('text-[16px] font-bold tabular-nums', warn ? 'text-red-500' : 'text-black')}>{value}</div>
+        <div className={classNames('whitespace-pre-line text-right text-[16px] font-bold tabular-nums leading-tight', warn ? 'text-red-500' : 'text-black')}>{value}</div>
       </div>
       <Sparkline data={data} max={max} color={color} warnColor={warnColor} warn={warn} height={36} />
       {subtitle ? <div className="text-[9px] text-gray-400">{subtitle}</div> : null}

@@ -9,6 +9,14 @@ vi.mock('../../src/main/postgres', () => ({
   previewTable: vi.fn().mockResolvedValue({ columns: [], rows: [], rowCount: 0, truncated: false, executionTimeMs: 0, notice: null }),
   getTableDdl: vi.fn().mockResolvedValue('CREATE TABLE test (id int);'),
   getHostStats: vi.fn().mockResolvedValue({}),
+  getMonitoringData: vi.fn().mockResolvedValue({
+    connectionsByState: [], connectionsByUser: [],
+    tableStats: [], unusedIndexes: [],
+    locksByType: [], blockedQueries: [],
+    deadlocks: 0, tempFiles: 0, tempBytes: 0, conflictsCount: 0,
+    checkpointsTimed: 0, checkpointsReq: 0, buffersCheckpoint: 0, buffersBgwriter: 0, buffersBackend: 0,
+    replicationLag: [], longRunningTxns: [],
+  }),
   getActiveQueries: vi.fn().mockResolvedValue([]),
   dropTable: vi.fn().mockResolvedValue(undefined),
   truncateTable: vi.fn().mockResolvedValue(undefined),
@@ -98,6 +106,7 @@ describe('IPC handlers', () => {
       'bootstrap',
       'get-pgpass-entries',
       'host-stats',
+      'monitoring-data',
       'active-queries',
       'test-connection',
       'connect',
@@ -341,6 +350,27 @@ describe('IPC handlers', () => {
       };
       await invoke('active-queries');
       expect(postgres.getActiveQueries).toHaveBeenCalledWith(appState.activeConnection);
+    });
+  });
+
+  describe('monitoring-data', () => {
+    it('throws without connection', async () => {
+      await expect(invoke('monitoring-data')).rejects.toThrow('No active database connection');
+    });
+
+    it('delegates to postgres.getMonitoringData', async () => {
+      appState.activeConnection = {
+        id: '1', name: 'test', host: 'localhost', port: 5432, user: 'pg', password: 'pw', database: 'db',
+      };
+      const result = await invoke('monitoring-data') as Record<string, unknown>;
+      expect(postgres.getMonitoringData).toHaveBeenCalledWith(appState.activeConnection);
+      expect(result).toHaveProperty('connectionsByState');
+      expect(result).toHaveProperty('tableStats');
+      expect(result).toHaveProperty('locksByType');
+      expect(result).toHaveProperty('deadlocks');
+      expect(result).toHaveProperty('checkpointsTimed');
+      expect(result).toHaveProperty('replicationLag');
+      expect(result).toHaveProperty('longRunningTxns');
     });
   });
 

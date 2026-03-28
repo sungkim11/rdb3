@@ -191,6 +191,26 @@ export interface BackupMeta {
   durationMs: number;
 }
 
+export interface MonitoringData {
+  connectionsByState: Array<{ state: string; count: number }>;
+  connectionsByUser: Array<{ user: string; count: number }>;
+  tableStats: Array<{ schema: string; table: string; seqScan: number; idxScan: number; rowsInserted: number; rowsUpdated: number; rowsDeleted: number; deadTuples: number; lastVacuum: string | null; lastAnalyze: string | null; tableSize: string }>;
+  unusedIndexes: Array<{ schema: string; table: string; index: string; size: string }>;
+  locksByType: Array<{ locktype: string; mode: string; count: number }>;
+  blockedQueries: Array<{ pid: number; query: string; waitingFor: number; durationMs: number }>;
+  deadlocks: number;
+  tempFiles: number;
+  tempBytes: number;
+  conflictsCount: number;
+  checkpointsTimed: number;
+  checkpointsReq: number;
+  buffersCheckpoint: number;
+  buffersBgwriter: number;
+  buffersBackend: number;
+  replicationLag: Array<{ clientAddr: string; state: string; sentLag: string; writeLag: string; flushLag: string; replayLag: string }>;
+  longRunningTxns: Array<{ pid: number; user: string; duration: string; state: string; query: string }>;
+}
+
 export interface BackupSchedule {
   id: string;
   days: string[];
