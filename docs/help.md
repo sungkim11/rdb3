@@ -32,7 +32,11 @@ To connect through a bastion host:
 
 ---
 
-## Schema Explorer
+## Data View
+
+The Data view is the default view when you open PostGrip. It provides the schema explorer, table preview, and all table management operations.
+
+### Schema Explorer
 
 The **Database** tab in the Explorer panel shows your database structure:
 
@@ -44,78 +48,25 @@ The **Database** tab in the Explorer panel shows your database structure:
 
 Empty schemas (with no tables) are also visible in the tree.
 
-Right-click a **schema** to create a new schema or table. Right-click a **table** for a context menu with additional operations.
+### Table Preview
 
----
+Click any table in the Schema Explorer to instantly preview its data. Results display in a sortable, paginated grid with resizable columns.
 
-## SQL Editor
+### Schema Operations
 
-Click **SQL Editor** in the menu bar or press the editor icon in the toolbar.
-
-### Writing Queries
-
-- The editor provides **SQL syntax highlighting** and **schema-aware autocomplete**
-- Type table or column names to see suggestions from your connected database
-- Use the query presets dropdown for common queries (Session info, Tables, Activity)
-
-### Running Queries
-
-- Click **Run** or press the run button to execute your query
-- Results appear in the Data pane below with sortable, paginated columns
-- Click column headers to sort ascending/descending
-
-### Multiple Tabs
-
-- Click **+** to open new query tabs
-- Each tab maintains its own SQL and results independently
-- Close tabs with the **x** button
-
-### Saving Queries
-
-Use **File > Save** or the export options to save your query text to a `.sql` file.
-
----
-
-## Data Pane
-
-The Data pane shows query results and table data.
-
-### Viewing Results
-
-- Results display in a grid with column headers
-- **Resize columns** by dragging the right edge of any column header
-- **Sort** by clicking column headers
-- **Paginate** using the navigation controls at the bottom
-
-### Editing Table Data
-
-1. Right-click a table in the Explorer and select **Edit Data**
-2. **Double-click** any cell to edit its value
-3. Use **Tab** / **Shift+Tab** to navigate between cells
-4. Click **+ Row** to add a new row
-5. Click the delete icon to mark rows for deletion
-6. Review pending changes in the toolbar, then click **Apply** to commit or **Discard** to cancel
-
-All changes are applied in a single database transaction.
-
----
-
-## Schema Operations
-
-Right-click any schema in the Schema Explorer:
+Right-click any **schema** in the Explorer:
 
 | Operation | Description |
 |-----------|-------------|
 | **Create Schema** | Create a new schema in the database |
 | **Create Table** | Open the full table builder to create a new table in the schema |
 
-## Table Operations
+### Table Operations
 
-Right-click any table in the Schema Explorer for these operations:
+Right-click any **table** in the Explorer:
 
 | Operation | Description |
 |-----------|-------------|
-| **Preview** | View the first rows of the table |
 | **Modify Table** | Rename, add/drop columns, add foreign keys and indexes |
 | **Edit Data** | Open the inline data editor |
 | **Export CSV** | Export full table data to a CSV file |
@@ -149,25 +100,66 @@ The Modify Table dialog lets you:
 
 A live DDL preview shows the full table structure, foreign keys, indexes, and pending ALTER statements. All changes are applied in a single transaction.
 
+### Editing Table Data
+
+1. Right-click a table in the Explorer and select **Edit Data**
+2. **Double-click** any cell to edit its value
+3. Use **Tab** / **Shift+Tab** to navigate between cells
+4. Click **+ Row** to add a new row
+5. Click the delete icon to mark rows for deletion
+6. Review pending changes in the toolbar, then click **Apply** to commit or **Discard** to cancel
+
+All changes are applied in a single database transaction.
+
+### Export Options
+
+- **CSV** -- right-click a table and select **Export CSV**, or use **View > Export CSV** for query results
+- **Parquet** -- right-click a table and select **Export Parquet** for columnar format ideal for analytics (DuckDB, Spark, Pandas)
+- **Excel** -- export query results to Excel format via the View menu
+- **pg_dump** -- right-click a table and select **Export pg_dump** (SQL, Custom, or Tar format)
+
+### File Explorer & Git
+
+The **Files** tab lets you browse the local filesystem. The **Git** tab shows discovered repositories with branch info, changed files, recent commits, and diff viewing.
+
 ---
 
-## Dashboard
+## SQL Editor
 
-When connected to a database, the Dashboard panel shows real-time server metrics:
+Click **SQL Editor** in the menu bar to open the editor. Write and run queries with a full-featured editor, then explore results in an interactive grid.
 
-- **CPU Usage** -- server CPU utilization (Linux servers with superuser access)
-- **RAM Usage** -- server memory utilization (Linux servers with superuser access)
-- **Cache Hit Ratio** -- database buffer cache effectiveness
-- **Transaction Throughput** -- transactions per second (TPS)
-- **Connection Saturation** -- active connections vs. max_connections
+### Writing Queries
 
-Metrics update every 10 seconds and display sparkline graphs for trend visualization. Polling automatically pauses when the app window is not visible.
+- The editor provides **SQL syntax highlighting** and **schema-aware autocomplete**
+- Type table or column names to see suggestions from your connected database
+- Use the query presets dropdown for common queries (Session info, Tables, Activity)
+
+### Running Queries
+
+- Click **Run** or press the run button to execute your query
+- Results appear in the Data pane below with sortable, paginated columns
+- Click column headers to sort ascending/descending
+
+### Multiple Tabs
+
+- Click **+** to open new query tabs
+- Each tab maintains its own SQL and results independently
+- Close tabs with the **x** button
+
+### Saving and Exporting
+
+- Save query text to `.sql` files
+- Export results to CSV or Excel from the View menu
 
 ---
 
 ## Monitoring
 
-Click **Monitoring** in the menu bar to open the full monitoring panel. This provides comprehensive PostgreSQL server metrics in a dedicated view.
+Click **Monitoring** in the menu bar to open the full monitoring panel. This provides comprehensive PostgreSQL server metrics in a dedicated view, updated in real time.
+
+### Dashboard
+
+When connected, the Dashboard panel in the sidebar shows real-time sparkline graphs for CPU, RAM, cache hit ratio, TPS, and connection saturation. Metrics update every 10 seconds and polling pauses when the window is hidden.
 
 ### Server Overview
 
@@ -185,51 +177,23 @@ Nine graphical metric cards with sparkline graphs:
 
 ### Checkpoints & Buffers
 
-Five stat cards showing:
-
-- Timed checkpoints and requested checkpoints
-- Buffers written by checkpoint, background writer, and backend processes
+Five stat cards showing timed and requested checkpoints, and buffers written by checkpoint, background writer, and backend processes.
 
 ### Connections
 
-Two tables showing connection breakdown:
-
-- **By State** -- active, idle, idle in transaction, etc.
-- **By User** -- connection count per database user
+Two tables showing connection breakdown by state (active, idle, idle in transaction) and by user.
 
 ### Locks
 
 - **By Type** -- current locks grouped by lock type and mode
 - **Blocked Queries** -- queries waiting on locks with PID, blocking PID, wait duration, and query text
 
-### Long Running Transactions
+### Additional Sections
 
-Lists all transactions running for more than 1 minute with PID, user, duration, state, and query.
-
-### Query History
-
-Recent queries from the current session with their results.
-
-### Table Statistics
-
-Top 50 tables sorted by activity:
-
-| Column | Description |
-|--------|-------------|
-| Seq Scan | Number of sequential scans |
-| Idx Scan | Number of index scans |
-| Ins/Upd/Del | Rows inserted, updated, deleted |
-| Dead | Dead tuples (candidates for vacuum) |
-| Size | Total table size |
-| Last Vacuum | When the table was last vacuumed |
-
-### Unused Indexes
-
-Indexes with zero scans, sorted by size. These are candidates for removal to save disk space and improve write performance.
-
-### Replication
-
-If the server has replicas, shows replication status including write lag, flush lag, and replay lag per client.
+- **Long Running Transactions** -- queries running for more than 1 minute with PID, user, duration, state, and query
+- **Table Statistics** -- top 50 tables by activity: sequential/index scans, rows inserted/updated/deleted, dead tuples, table size, last vacuum
+- **Unused Indexes** -- indexes with zero scans, sorted by size -- candidates for removal
+- **Replication** -- replica lag monitoring (write lag, flush lag, replay lag per client)
 
 Click **Refresh** to reload all metrics, or **Close** to return to the Data pane.
 
@@ -237,7 +201,7 @@ Click **Refresh** to reload all metrics, or **Close** to return to the Data pane
 
 ## Backup & Restore
 
-Click **Backup & Restore** in the menu bar to open the backup panel.
+Click **Backup & Restore** in the menu bar to open the backup panel. Full database backup management is built into the app -- back up on demand or on a schedule, browse history, and restore with one click.
 
 ### Backup Now
 
@@ -285,63 +249,6 @@ Click **Restore** next to any backup in the history:
 ### Backup Directory
 
 The default backup directory is `~/PostGrip_Backups`. Click **Change** to select a different directory. The preference persists across sessions.
-
----
-
-## File Explorer
-
-The **Files** tab in the Explorer panel lets you browse your local filesystem:
-
-- Click folders to expand/collapse them
-- Double-click folders to navigate into them
-- Click the **up arrow** to go to the parent directory
-- Click any file to open it -- `.sql` files open in the SQL Editor
-
----
-
-## Git Integration
-
-The **Git** tab in the Explorer panel shows git repositories found in your developer directories:
-
-### Repository List
-
-Repositories are automatically discovered from common directories (~/Developer, ~/Projects, ~/repos, etc.). Click a repository to:
-
-- View its current **branch**
-- See **changed files** with status indicators (M=Modified, A=Added, D=Deleted)
-- Browse **recent commits**
-- Expand the repository as a **file tree**
-
-### Working with Changes
-
-- Click a **modified file** to view its diff
-- Click an **untracked file** to open it in the editor
-- `.sql` files always open in the SQL Editor
-
----
-
-## Export Options
-
-### CSV Export
-
-- From results: Use **View > Export CSV** to export the current query results
-- From tables: Right-click a table and select **Export CSV** to export the full table
-
-### Parquet Export
-
-Right-click a table and select **Export Parquet** to export data in Apache Parquet format. Parquet is a columnar storage format ideal for analytics and data engineering workflows. PostgreSQL types are automatically mapped to Parquet types (integers, floats, booleans, and strings).
-
-### Excel Export
-
-Query results can be exported to Excel format via the View menu.
-
-### pg_dump Export
-
-Right-click a table and select **Export pg_dump** to export using PostgreSQL's native dump tool. Supported formats:
-
-- **SQL** -- plain SQL statements
-- **Custom** -- compressed binary format (restorable with pg_restore)
-- **Tar** -- tar archive format
 
 ---
 
