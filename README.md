@@ -9,7 +9,7 @@ PostGrip is a fast, lightweight desktop client for PostgreSQL. Browse schemas, w
 ## Why PostGrip?
 
 - **Zero config** — Reads your `~/.pgpass` automatically and offers one-click connections
-- **Fast startup** — Opens in under a second, no splash screens or loading spinners
+- **Fast startup** — Opens in under a second, auto-reconnects to your last database
 - **Built for daily use** — Schema explorer, SQL editor with autocomplete, inline data editing, and real-time server metrics in one window
 - **SSH tunnel support** — Connect through bastion hosts with password or private key auth
 - **Cross-platform** — Ships as a universal macOS DMG, Windows installer, and Linux AppImage/deb
@@ -19,6 +19,7 @@ PostGrip is a fast, lightweight desktop client for PostgreSQL. Browse schemas, w
 ### Connection Management
 - Save, edit, and manage multiple PostgreSQL connections
 - Auto-import connections from `~/.pgpass`
+- Auto-reconnect to the last used database on startup
 - Test connections before saving
 - Quick-switch between saved connections
 - Password auth or `~/.pgpass`-based auth
@@ -29,7 +30,9 @@ PostGrip is a fast, lightweight desktop client for PostgreSQL. Browse schemas, w
 - Column details with data types, nullability, and defaults
 - Primary key, unique, and foreign key display with referenced tables
 - Index listing with uniqueness indicators
-- Right-click context menu with full table operations
+- Empty schemas and tables visible in the tree
+- Right-click context menu on schemas to create new schemas and tables
+- Right-click context menu on tables with full table operations
 
 ### File Explorer & Git Integration
 - Browse the local filesystem directly from the sidebar
@@ -67,12 +70,16 @@ A dedicated full-pane monitoring view (click **Monitoring** in the menu bar) wit
 - **Unused Indexes** — indexes with zero scans, sorted by size
 - **Replication** — replica lag monitoring (write, flush, replay lag)
 
-### Table Operations (right-click context menu)
-- **Show DDL** — view the `CREATE TABLE` statement
+### Schema Operations (right-click context menu on schemas)
+- **Create Schema** — create a new schema
+- **Create Table** — full table builder with columns, primary keys, foreign keys, indexes, and live SQL preview
+
+### Table Operations (right-click context menu on tables)
+- **Modify Table** — rename table, add/drop/rename columns, change types and defaults, add foreign keys and indexes with live DDL preview
 - **Edit Data** — inline-editable data grid with cell editing, row add/delete, NULL handling, and pending change tracking
-- **Export CSV** — export table data to CSV
+- **Export CSV** — export full table data to CSV
+- **Export Parquet** — export table data to Apache Parquet format
 - **Export with pg_dump** — export via `pg_dump` (SQL, custom, or tar format)
-- **Modify Table** — rename table, add/drop/rename columns, change types and defaults with live DDL preview
 - **Truncate / Drop Table** — with confirmation dialog and optional CASCADE
 
 ### Backup & Restore

@@ -13,6 +13,8 @@
    - **Database** -- the database name (default: postgres)
 3. Click **Test Connection** to verify, then **Connect** to save and connect
 
+PostGrip remembers your last used database and automatically reconnects on startup.
+
 ### Using ~/.pgpass
 
 PostGrip automatically detects entries in your `~/.pgpass` file and displays them in the Connections panel under the **.pgpass** section. Click any entry to pre-fill the connection form.
@@ -35,12 +37,14 @@ To connect through a bastion host:
 The **Database** tab in the Explorer panel shows your database structure:
 
 - **Schemas** -- expand to see tables and views
-- **Tables** -- expand to see columns, keys, and indexes
+- **Tables** -- expand to see columns, keys, and indexes (empty tables are shown too)
 - **Columns** -- shows data type, nullability, and default values
 - **Keys** -- primary keys, unique constraints, and foreign keys
 - **Indexes** -- index names, columns, and uniqueness
 
-Right-click any table for a context menu with additional operations.
+Empty schemas (with no tables) are also visible in the tree.
+
+Right-click a **schema** to create a new schema or table. Right-click a **table** for a context menu with additional operations.
 
 ---
 
@@ -96,6 +100,15 @@ All changes are applied in a single database transaction.
 
 ---
 
+## Schema Operations
+
+Right-click any schema in the Schema Explorer:
+
+| Operation | Description |
+|-----------|-------------|
+| **Create Schema** | Create a new schema in the database |
+| **Create Table** | Open the full table builder to create a new table in the schema |
+
 ## Table Operations
 
 Right-click any table in the Schema Explorer for these operations:
@@ -103,27 +116,38 @@ Right-click any table in the Schema Explorer for these operations:
 | Operation | Description |
 |-----------|-------------|
 | **Preview** | View the first rows of the table |
-| **Show DDL** | Display the CREATE TABLE statement |
+| **Modify Table** | Rename, add/drop columns, add foreign keys and indexes |
 | **Edit Data** | Open the inline data editor |
-| **Modify Table** | Add, drop, or rename columns; change types and defaults |
-| **Export CSV** | Export table data to a CSV file |
+| **Export CSV** | Export full table data to a CSV file |
+| **Export Parquet** | Export table data to Apache Parquet format |
 | **Export pg_dump** | Export using pg_dump (SQL, custom, or tar format) |
 | **Truncate** | Remove all rows (with optional CASCADE) |
 | **Drop** | Permanently delete the table (with optional CASCADE) |
+
+### Create Table
+
+The Create Table dialog provides a full table builder:
+
+- **Columns** -- define name, type (dropdown with common PostgreSQL types), primary key flag, nullability, and default value
+- **Foreign Keys** -- add constraints with dropdowns for source column, reference table, and reference column (populated from the database tree)
+- **Indexes** -- add indexes with a multi-column picker and unique flag
+- **SQL Preview** -- live preview updates as you build the table, showing the exact CREATE TABLE and CREATE INDEX statements
 
 ### Modify Table
 
 The Modify Table dialog lets you:
 
 - Rename the table
-- Add new columns with type, nullability, and default value
+- Add new columns with type (dropdown), nullability, and default value
 - Drop existing columns
 - Rename columns
 - Change column data types
 - Toggle NOT NULL constraints
 - Set or remove default values
+- Add foreign key constraints to existing or new columns (with dropdowns populated from the database tree)
+- Add indexes with a multi-column picker and unique flag
 
-A live DDL preview shows the ALTER TABLE statements that will be executed. All changes are applied in a single transaction.
+A live DDL preview shows the full table structure, foreign keys, indexes, and pending ALTER statements. All changes are applied in a single transaction.
 
 ---
 
@@ -301,7 +325,11 @@ Repositories are automatically discovered from common directories (~/Developer, 
 ### CSV Export
 
 - From results: Use **View > Export CSV** to export the current query results
-- From tables: Right-click a table and select **Export CSV**
+- From tables: Right-click a table and select **Export CSV** to export the full table
+
+### Parquet Export
+
+Right-click a table and select **Export Parquet** to export data in Apache Parquet format. Parquet is a columnar storage format ideal for analytics and data engineering workflows. PostgreSQL types are automatically mapped to Parquet types (integers, floats, booleans, and strings).
 
 ### Excel Export
 
@@ -329,7 +357,10 @@ Right-click a table and select **Export pg_dump** to export using PostgreSQL's n
 
 ## Tips
 
+- **Auto-reconnect**: PostGrip remembers your last database and reconnects automatically on startup
 - **Quick connect**: If your credentials are in ~/.pgpass, PostGrip shows them in the sidebar for one-click connection setup
 - **Multiple connections**: Save multiple connections and switch between them instantly from the sidebar
 - **Query history**: The Dashboard panel tracks your recent queries with execution times
 - **Column resize**: Drag column borders in the results grid to adjust widths
+- **Create tables visually**: Right-click a schema to build tables with primary keys, foreign keys, and indexes -- no SQL needed
+- **Export for analytics**: Use Parquet export for large datasets destined for data pipelines or tools like DuckDB, Spark, or Pandas
