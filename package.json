@@ -1,7 +1,7 @@
 {
   "name": "postgrip",
   "productName": "PostGrip",
-  "version": "0.1.1",
+  "version": "0.3.0",
   "description": "Desktop PostgreSQL database client",
   "main": "dist/main/index.js",
   "scripts": {
@@ -42,7 +42,9 @@
       "target": [
         {
           "target": "dmg",
-          "arch": ["universal"]
+          "arch": [
+            "universal"
+          ]
         }
       ],
       "artifactName": "${productName}-${version}-mac.${ext}"
@@ -52,7 +54,9 @@
       "target": [
         {
           "target": "nsis",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
         }
       ],
       "artifactName": "${productName}-${version}-win.${ext}"
@@ -63,11 +67,15 @@
       "target": [
         {
           "target": "AppImage",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
         },
         {
           "target": "deb",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
         }
       ],
       "artifactName": "${productName}-${version}-linux.${ext}"
