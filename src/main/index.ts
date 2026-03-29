@@ -2,6 +2,16 @@ import { app, BrowserWindow } from 'electron';
 import path from 'node:path';
 import { registerIpcHandlers } from './ipc';
 
+// Prevent the app from crashing on transient connection errors (e.g. server
+// restarts, admin-terminated connections). These are recoverable — the pool
+// will create fresh connections on the next query.
+process.on('uncaughtException', (err) => {
+  console.error('Uncaught exception:', err);
+});
+process.on('unhandledRejection', (reason) => {
+  console.error('Unhandled rejection:', reason);
+});
+
 // Allow E2E tests to isolate userData to a temp directory
 if (process.env.ELECTRON_USER_DATA_DIR) {
   app.setPath('userData', process.env.ELECTRON_USER_DATA_DIR);
