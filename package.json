@@ -96,7 +96,7 @@
     "@types/ssh2": "^1.15.5",
     "@vitest/coverage-v8": "^4.1.2",
     "dotenv": "^17.3.1",
-    "electron": "41.0.3",
+    "electron": "41.1.0",
     "electron-builder": "^26.8.1",
     "electron-playwright-helpers": "^2.1.0",
     "jsdom": "^29.0.1",
